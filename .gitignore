@@ -1,0 +1,113 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Logs and Debug
+*.log
+*.log.json
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and Editor settings
+.vscode/
+.idea/
+.spyderproject
+.spyproject
+.ropeproject
+.DS_Store
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Sphinx documentation
+docs/en/_build/
+docs/zh_cn/_build/
+
+# MkDocs documentation
+/site
+
+# mypy
+.mypy_cache/
+
+# Pytorch and Model Checkpoints
+*.pth
+*.pt
+weights/
+checkpoints/
+
+# MMDetection specific
+mmdet/.mim
+work_dirs/
+*.pkl
+*.pkl.json
+data/
+docs/modelzoo_statistics.md
+outputs/
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+*.py~
+*.sh~
+
+# Miscellaneous
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
