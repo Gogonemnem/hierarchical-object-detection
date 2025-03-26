@@ -77,9 +77,6 @@ def main():
     )
 
     url = data2url.get(args.dataset_name, None)
-    if url is None:
-        print('Only support DIOR for now!')
-        return
 
     if args.dataset_name == 'dior':
         download_gdrive(
@@ -89,6 +86,10 @@ def main():
             delete=args.delete,
             threads=args.threads
         )
+
+    if url is None:
+        print('Only support DIOR for now!')
+        return
 
 
 if __name__ == '__main__':
