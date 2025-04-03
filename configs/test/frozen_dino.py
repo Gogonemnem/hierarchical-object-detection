@@ -2,9 +2,11 @@ _base_ = [
     '../dino/dino-4scale_r50_8xb2-36e_coco.py'
 ]
 
+custom_imports = dict(imports=['hod.evaluation'], allow_failed_imports=False)
+
 # learning policy
 # max_epochs = 13
-max_epochs = 24
+max_epochs = 48
 train_cfg = dict(
     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 
@@ -18,8 +20,8 @@ param_scheduler = [
         gamma=0.1)
 ]
 
-# load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
-load_from = "/home/gonem/Documents/Projects/hierarchical-object-detection/work_dirs/frozen_dino/epoch_19.pth"
+load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
+# load_from = "/home/gonem/Documents/Projects/hierarchical-object-detection/work_dirs/frozen_dino/epoch_24.pth"
 resume = True
 
 model = dict(
@@ -30,6 +32,18 @@ model = dict(
         num_classes=81,
     ),
 )
+
+
+import matplotlib.pyplot as plt
+
+def generate_palette(n):
+    cmap = plt.get_cmap("tab20")  # 20-color map for high contrast
+    colors = []
+    for i in range(n):
+        color = cmap(i % 20)  # cycle if more than 20
+        rgb = tuple(int(255 * c) for c in color[:3])
+        colors.append(rgb)
+    return colors
 
 # Modify dataset related settings
 data_root = 'data/aircraft/'
@@ -51,65 +65,51 @@ metainfo = {
             "Fixed-Wing Aircraft": {
                 "Combat Aircraft": {
                     "Fighters and Multirole": {
-                        "American Fighters": ["F-4", "F-14", "F-15", "F-16", "F/A-18", "F-117", "F-22", "F-35", "YF-23"],
-                        "Russian Fighters": ["MiG-29", "MiG-31", "Su-57"],
-                        "Western Fighters": ["JAS-39", "Mirage2000", "Rafale", "EF-2000", "Tornado"],
-                        "Asian Fighters": ["J-10", "J-20", "J-35", "JF-17", "JH-7", "KF-21", "KAAN"]
+                        "American Fighters": ["F117", "F14", "F15", "F16", "F18", "F22", "F35", "F4", "YF23"],
+                        "Russian Fighters": ["Mig29", "Mig31", "Su57"],
+                        "Western Fighters": ["JAS39", "Mirage2000", "Rafale", "EF2000", "Tornado"],
+                        "Asian Fighters": ["J10", "J20", "J35", "JF17", "JH7", "KF21", "KAAN"]
                     },
-                    "Attack Aircraft": ["A-10", "AV-8B", "EMB-314", "Su-25"],
+                    "Attack Aircraft": ["A10", "AV8B", "EMB314", "Su25"],
                     "Bombers": {
-                        "American Bombers": ["B-1", "B-2", "B-21", "B-52", "XB-70"],
-                        "Russian Bombers": ["Tu-160", "Tu-22M", "Tu-95", "Su-24", "Su-34"],
-                        "Chinese Bombers": ["H-6"],
+                        "American Bombers": ["B1", "B2", "B21", "B52", "XB70"],
+                        "Russian Bombers": ["Tu160", "Tu22M", "Tu95", "Su24", "Su34"],
+                        "Chinese Bombers": ["H6"],
                         "British Bombers": ["Vulcan"]
                     },
                     "Reconnaissance and Surveillance": {
-                        "Airborne Early Warning": ["E-2", "E-7"],
-                        "High Altitude Reconnaissance": ["SR-71", "U-2"],
-                        "Maritime Patrol": ["P-3", "KJ-600", "WZ-7"]
+                        "Airborne Early Warning": ["E2", "E7", "KJ600"],
+                        "High Altitude Reconnaissance": ["SR71", "U2"],
+                        "Maritime Patrol": ["P3", "WZ7"]
                     }
                 },
                 "Transport and Utility": {
                     "Cargo Transports": {
-                        "American Cargo Transports": ["C-130", "C-17", "C-2", "C-5", "KC-135"],
-                        "European Cargo Transports": ["A-400M"],
-                        "Latin American Cargo Transports": ["C-390"],
-                        "Russian Cargo Transports": ["An-124", "An-22", "An-225", "An-72", "Il-76"],
-                        "Chinese Cargo Transports": ["Y-20"]
+                        "American Cargo Transports": ["C130", "C17", "C2", "C5", "KC135"],
+                        "European Cargo Transports": ["A400M"],
+                        "Latin American Cargo Transports": ["C390"],
+                        "Russian Cargo Transports": ["An124", "An22", "An225", "An72", "Il76"],
+                        "Chinese Cargo Transports": ["Y20"]
                     },
-                    "Amphibious Aircraft": ["US-2", "AG-600", "Be-200", "CL-415"]
+                    "Amphibious Aircraft": ["AG600", "Be200", "CL415", "US2"]
                 }
             },
             "Rotorcraft": {
-                "Attack Helicopters": ["AH-64", "Ka-52", "Mi-24", "Mi-28", "Z-10"],
+                "Attack Helicopters": ["AH64", "Ka52", "Mi24", "Mi28", "Z10"],
                 "Utility and Transport Helicopters": {
-                    "Land-Based Helicopters": ["CH-47", "Mi-8", "UH-60"],
-                    "Naval and Specialized Helicopters": ["Ka-27", "Z-19"]
+                    "Land-Based Helicopters": ["CH47", "Mi8", "Mi26", "UH60"],
+                    "Naval and Specialized Helicopters": ["Ka27", "Z19"]
                 }
             },
             "Unmanned Aerial Vehicles": {
-                "Combat and Reconnaissance Drones": ["MQ-9", "RQ-4"],
-                "Tactical UAVs": ["TB-001", "TB-2"]
+                "Combat and Reconnaissance Drones": ["MQ9", "RQ4"],
+                "Tactical UAVs": ["TB001", "TB2"]
             },
-            "Tiltrotor Aircraft": ["V-22", "V-280"]
+            "Tiltrotor Aircraft": ["V22", "V280"]
         }
     },
+    'palette': generate_palette(81),
 }
-# metainfo = {
-#     'classes': (
-#         "airplane", "airport", "baseballfield", "basketballcourt", "bridge",
-#         "chimney", "dam", "Expressway-Service-area", "Expressway-toll-station",
-#         "groundtrackfield", "golffield", "harbor", "overpass", "ship", "stadium", 
-#         "storagetank", "tenniscourt", "trainstation", "vehicle", "windmill"
-#     ),
-#     'palette': [
-#         (220, 20, 60), (0, 128, 0), (0, 0, 128), (255, 165, 0),
-#         (255, 69, 0), (75, 0, 130), (255, 140, 0), (255, 105, 180),
-#         (30, 144, 255), (255, 215, 0), (0, 191, 255), (0, 250, 154),
-#         (85, 107, 47), (100, 149, 237), (72, 61, 139), (255, 99, 71),
-#         (127, 255, 0), (0, 255, 127), (64, 224, 208), (240, 128, 128)
-#     ]
-# }
 
 train_dataloader = dict(
     batch_size=2,
@@ -131,7 +131,7 @@ val_dataloader = dict(
     )
 
 test_dataloader = dict(
-    batch_size=2,
+    batch_size=6,
     dataset=dict(
         data_root=data_root,
         metainfo=metainfo,
@@ -141,6 +141,13 @@ test_dataloader = dict(
     )
 
 # Modify metric related settings
-val_evaluator = dict(ann_file=data_root + 'aircraft_validation.json')
-test_evaluator = dict(ann_file=data_root + 'aircraft_test.json')
+val_evaluator = dict(
+    type='CocoMetric', # 'PRFMetric',
+    ann_file=data_root + 'aircraft_validation.json' # for CocoMetric
+    )
+test_evaluator = dict(
+    type='CocoMetric',
+    ann_file=data_root + 'aircraft_test.json', # for CocoMetric
+    outfile_prefix='./outputs/results/test'
+    )
 
