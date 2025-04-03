@@ -1,0 +1,22 @@
+services:
+  hod:
+      runtime: nvidia
+      shm_size: 12gb
+      stdin_open: true  # docker run -i
+      tty: true  # docker run -t
+      command: /usr/sbin/sshd -D
+      ports:
+        - "${PORT:-13521}:22"
+      environment:
+        - HOME=$HOME
+        - USER=$USER
+        - NVIDIA_VISIBLE_DEVICES=3
+        - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      volumes:
+        - /data/$USER/hierarchical-object-detection:/root/hierarchical-object-detection
+        - $HOME/.ssh:/root/.ssh
+        - $HOME/.vscode-server:/root/.vscode-server
+        - $HOME/.gitconfig:/root/.gitconfig
+      build:
+        dockerfile: Dockerfile
+
