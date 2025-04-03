@@ -121,7 +121,7 @@ def cvt_to_coco_json(split_to_images, subtract_one=True):
         for cat, idx in label_ids.items():
             coco['categories'].append({
                 'supercategory': 'none',  # or set a high-level parent if you wish
-                'id': idx + 1,
+                'id': idx,
                 'name': cat
             })
         image_id = 0
