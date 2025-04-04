@@ -13,6 +13,7 @@ from mmdet.utils import setup_cache_size_limit_of_dynamo
 # Patch torch.load to disable `weights_only=True` introduced in PyTorch 2.6
 # This avoids UnpicklingError when resuming from checkpoints saved with full objects.
 # Safe to use ONLY when loading checkpoints from trusted sources (e.g., your own training).
+import torch
 _real_load = torch.load
 
 def safe_load(*args, **kwargs):
