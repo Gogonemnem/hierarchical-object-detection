@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m pip install --upgrade pip
 
 # Install MMEngine and MMCV
-RUN pip install openmim ipykernel && \
+RUN pip install openmim ipykernel kaggle && \
     mim install "mmengine>=0.7.1" "mmcv>=2.0.0rc4"
 
 # Install MMDetection
@@ -35,6 +35,9 @@ RUN conda clean --all \
     && git clone https://github.com/open-mmlab/mmdetection.git /mmdetection \
     && cd /mmdetection \
     && pip install --no-cache-dir -e .
+
+# Patch MMDetection to allow MMCV==2.2.0 and MMEngine>=0.7.1,<1.0.0
+RUN sed -i "s/mmcv_maximum_version = '2.2.0'/mmcv_maximum_version = '2.3.0'/" /mmdetection/mmdet/__init__.py
 
 RUN python -c "import torch; print('CUDA Available:', torch.cuda.is_available()); print('CUDA Version:', torch.version.cuda)"
 
@@ -47,5 +50,7 @@ RUN apt-get update && apt-get install -y openssh-server && \
     sed -ri 's/UsePAM yes/#UsePAM yes/g' /etc/ssh/sshd_config
 
 EXPOSE 22
+
+RUN echo "source /opt/conda/etc/profile.d/conda.sh && conda activate base" >> /root/.bashrc
 
 CMD ["/usr/sbin/sshd", "-D"]
