@@ -9,12 +9,17 @@ from mmengine.runner import Runner
 
 from mmdet.utils import setup_cache_size_limit_of_dynamo
 
-# import sys
 
-# # Get the root directory of the project dynamically
-# project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-# sys.path.insert(0, project_root)
+# Patch torch.load to disable `weights_only=True` introduced in PyTorch 2.6
+# This avoids UnpicklingError when resuming from checkpoints saved with full objects.
+# Safe to use ONLY when loading checkpoints from trusted sources (e.g., your own training).
+_real_load = torch.load
 
+def safe_load(*args, **kwargs):
+    kwargs['weights_only'] = False  # allow loading full objects (e.g., mmengine ConfigDict, HistoryBuffer)
+    return _real_load(*args, **kwargs)
+
+torch.load = safe_load
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
