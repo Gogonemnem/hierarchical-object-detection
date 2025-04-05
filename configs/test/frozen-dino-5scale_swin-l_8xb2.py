@@ -30,6 +30,9 @@ model_wrapper_cfg = dict(
 )
 
 model = dict(
+    backbone=dict(
+        frozen_stages=4,
+    ),
     bbox_head=dict(
         num_classes=81,
     ),
