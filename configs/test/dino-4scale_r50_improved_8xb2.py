@@ -6,7 +6,7 @@ custom_imports = dict(imports=['hod.evaluation'], allow_failed_imports=False)
 
 # learning policy
 # max_epochs = 13
-max_epochs = 12
+max_epochs = 36
 train_cfg = dict(
     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 
@@ -16,12 +16,13 @@ param_scheduler = [
         begin=0,
         end=max_epochs,
         by_epoch=True,
-        milestones=[11],
+        milestones=[30],
         gamma=0.1)
 ]
 
+
 load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
-# load_from = "/home/gonem/Documents/Projects/hierarchical-object-detection/work_dirs/frozen_dino/epoch_25.pth"
+# load_from = "work_dirs/dino-4scale_r50_improved_8xb2/epoch_12.pth"
 resume = False
 
 model = dict(
