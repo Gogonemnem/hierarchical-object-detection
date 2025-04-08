@@ -125,6 +125,9 @@ def main():
         # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
 
+    # Workaround for reentrant backward issues with Swin/DDP
+    runner.model._set_static_graph()
+    
     # start training
     runner.train()
 
