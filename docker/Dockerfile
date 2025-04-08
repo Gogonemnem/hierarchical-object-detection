@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m pip install --upgrade pip
 
 # Install MMEngine and MMCV
-RUN pip install openmim ipykernel kaggle && \
+RUN pip install openmim ipykernel kaggle seaborn && \
     mim install "mmengine>=0.7.1" "mmcv>=2.0.0rc4"
 
 # Install MMDetection
