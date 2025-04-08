@@ -5,7 +5,6 @@ _base_ = [
 custom_imports = dict(imports=['hod.evaluation'], allow_failed_imports=False)
 
 # learning policy
-# max_epochs = 13
 max_epochs = 36
 train_cfg = dict(
     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
@@ -20,9 +19,9 @@ param_scheduler = [
         gamma=0.1)
 ]
 
-# load_from = "https://github.com/RistoranteRist/mmlab-weights/releases/download/dino-swinl/dino-5scale_swin-l_8xb2-36e_coco-5486e051.pth"
-load_from = "/root/hierarchical-object-detection/work_dirs/dino-5scale_swin-l_8xb2/epoch_12.pth"
-resume = True
+load_from = "https://github.com/RistoranteRist/mmlab-weights/releases/download/dino-swinl/dino-5scale_swin-l_8xb2-36e_coco-5486e051.pth"
+# load_from = "work_dirs/dino-5scale_swin-l_8xb2/epoch_12.pth"
+resume = False
 
 model_wrapper_cfg = dict(
     type='MMDistributedDataParallel',
