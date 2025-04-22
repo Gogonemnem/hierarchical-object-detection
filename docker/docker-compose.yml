@@ -6,11 +6,11 @@ services:
       tty: true  # docker run -t
       command: /usr/sbin/sshd -D
       ports:
-        - "${PORT:-13521}:22"
+        - "${PORT}:22"
       environment:
         - HOME=$HOME
         - USER=$USER
-        - NVIDIA_VISIBLE_DEVICES=2,3
+        - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
         - CUDA_DEVICE_ORDER=PCI_BUS_ID
       volumes:
         - /data/$USER/hierarchical-object-detection:/root/hierarchical-object-detection
