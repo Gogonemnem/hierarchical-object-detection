@@ -126,7 +126,10 @@ def main():
         runner = RUNNERS.build(cfg)
 
     # Workaround for reentrant backward issues with Swin/DDP
-    runner.model._set_static_graph()
+    try:
+        runner.model._set_static_graph()
+    except AttributeError:
+        pass
     
     # start training
     runner.train()
