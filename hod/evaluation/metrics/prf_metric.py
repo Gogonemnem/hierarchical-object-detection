@@ -1,5 +1,7 @@
 import os
 import json
+from terminaltables import AsciiTable
+
 import numpy as np
 import torch
 from typing import Dict
@@ -7,7 +9,6 @@ from mmengine.evaluator import BaseMetric
 from mmengine.registry import METRICS
 from mmdet.evaluation import bbox_overlaps
 from mmengine.fileio import dump
-from terminaltables import AsciiTable
 from mmengine.logging import MMLogger
 
 @METRICS.register_module()
@@ -101,9 +102,9 @@ class PRFMetric(BaseMetric):
 
             # Process ground truth.
             gt = sample['gt_instances']
-            gt_bboxes = (gt['bboxes'].cpu().numpy() 
+            gt_bboxes = (gt['bboxes'].cpu().numpy()
                          if hasattr(gt['bboxes'], 'cpu') else np.array(gt['bboxes']))
-            gt_labels = (gt['labels'].cpu().numpy() 
+            gt_labels = (gt['labels'].cpu().numpy()
                          if hasattr(gt['labels'], 'cpu') else np.array(gt['labels']))
 
             matched = np.zeros(len(gt_labels), dtype=bool)
