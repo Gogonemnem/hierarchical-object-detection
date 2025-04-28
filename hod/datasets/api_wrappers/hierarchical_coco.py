@@ -10,7 +10,6 @@ from mmdet.datasets.api_wrappers import COCOeval
 from pycocotools.cocoeval import Params as _Params
 
 from hod.utils.tree import HierarchyTree
-from hod.evaluation.metrics.hprf_metric import hierarchical_prf_metric
 
 
 class HierarchicalCOCOeval(COCOeval):
@@ -480,3 +479,40 @@ class HierarchicalCOCOeval(COCOeval):
         elif iouType == 'keypoints':
             summarize = _summarizeKps
         self.stats = summarize()
+
+
+def hierarchical_prf_metric(
+    hierarchy_tree: HierarchyTree,
+    dt_label,
+    gt_label,
+    label_to_name: Dict = None,
+    return_paths: bool = False
+):
+    """Compute hierarchical precision, recall, and F1 between predicted and GT labels.
+
+    Optionally returns the raw paths for additional use in aggregation.
+    """
+    if label_to_name is not None:
+        dt_label = label_to_name.get(int(dt_label), str(dt_label))
+        gt_label = label_to_name.get(int(gt_label), str(gt_label))
+
+    dt_path = hierarchy_tree.get_path(dt_label)
+    gt_path = hierarchy_tree.get_path(gt_label)
+    overlap = set(dt_path) & set(gt_path)
+    hprecision = len(overlap) / len(dt_path)
+    hrecall = len(overlap) / len(gt_path)
+    hf1 = (2 * hprecision * hrecall / (hprecision + hrecall + 1e-6)) if (hprecision + hrecall) > 0 else 0.0
+    results = {
+        'hpr': hprecision,
+        'hr': hrecall,
+        'hf1': hf1,
+    }
+    if return_paths:
+        results.update({
+            'len_overlap': len(overlap),
+            'len_dt': len(dt_path),
+            'len_gt': len(gt_path),
+            'pred_path': dt_path,
+            'gt_path': gt_path,
+        })
+    return results
