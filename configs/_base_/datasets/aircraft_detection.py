@@ -1,39 +1,12 @@
+_base_ =[
+    './coco_detection.py',
+]
 # dataset settings
-dataset_type = 'CocoDataset'
+# dataset_type = 'AircraftDataset'
 data_root = 'data/aircraft/'
 
-# Example to use different file client
-# Method 1: simply set the data root and let the file I/O module
-# automatically infer from prefix (not support LMDB and Memcache yet)
-
-# data_root = 's3://openmmlab/datasets/detection/coco/'
-
-# Method 2: Use `backend_args`, `file_client_args` in versions before 3.0.0rc6
-# backend_args = dict(
-#     backend='petrel',
-#     path_mapping=dict({
-#         './data/': 's3://openmmlab/datasets/detection/',
-#         'data/': 's3://openmmlab/datasets/detection/'
-#     }))
 backend_args = None
 
-train_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=backend_args),
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
-    dict(type='RandomFlip', prob=0.5),
-    dict(type='PackDetInputs')
-]
-test_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=backend_args),
-    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
-    # If you don't have a gt annotation, delete the pipeline
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(
-        type='PackDetInputs',
-        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
-                   'scale_factor'))
-]
 classes = (
         "A10", "A400M", "AG600", "AH64", "AV8B", "An124", "An22", "An225",
         "An72", "B1", "B2", "B21", "B52", "Be200", "C130", "C17", "C2",
@@ -142,69 +115,189 @@ taxonomy = {
         }
     }
 }
-import matplotlib.pyplot as plt
 
-def generate_palette(n):
-    cmap = plt.get_cmap("tab20")  # 20-color map for high contrast
-    colors = []
-    for i in range(n):
-        color = cmap(i % 20)  # cycle if more than 20
-        rgb = tuple(int(255 * c) for c in color[:3])
-        colors.append(rgb)
-    return colors
+palette = [
+    (31, 119, 180),
+    (174, 199, 232),
+    (255, 127, 14),
+    (255, 187, 120),
+    (44, 160, 44),
+    (152, 223, 138),
+    (214, 39, 40),
+    (255, 152, 150),
+    (148, 103, 189),
+    (197, 176, 213),
+    (140, 86, 75),
+    (196, 156, 148),
+    (227, 119, 194),
+    (247, 182, 210),
+    (127, 127, 127),
+    (199, 199, 199),
+    (188, 189, 34),
+    (219, 219, 141),
+    (23, 190, 207),
+    (158, 218, 229),
+    (31, 119, 180),
+    (174, 199, 232),
+    (255, 127, 14),
+    (255, 187, 120),
+    (44, 160, 44),
+    (152, 223, 138),
+    (214, 39, 40),
+    (255, 152, 150),
+    (148, 103, 189),
+    (197, 176, 213),
+    (140, 86, 75),
+    (196, 156, 148),
+    (227, 119, 194),
+    (247, 182, 210),
+    (127, 127, 127),
+    (199, 199, 199),
+    (188, 189, 34),
+    (219, 219, 141),
+    (23, 190, 207),
+    (158, 218, 229),
+    (31, 119, 180),
+    (174, 199, 232),
+    (255, 127, 14),
+    (255, 187, 120),
+    (44, 160, 44),
+    (152, 223, 138),
+    (214, 39, 40),
+    (255, 152, 150),
+    (148, 103, 189),
+    (197, 176, 213),
+    (140, 86, 75),
+    (196, 156, 148),
+    (227, 119, 194),
+    (247, 182, 210),
+    (127, 127, 127),
+    (199, 199, 199),
+    (188, 189, 34),
+    (219, 219, 141),
+    (23, 190, 207),
+    (158, 218, 229),
+    (31, 119, 180),
+    (174, 199, 232),
+    (255, 127, 14),
+    (255, 187, 120),
+    (44, 160, 44),
+    (152, 223, 138),
+    (214, 39, 40),
+    (255, 152, 150),
+    (148, 103, 189),
+    (197, 176, 213),
+    (140, 86, 75),
+    (196, 156, 148),
+    (227, 119, 194),
+    (247, 182, 210),
+    (127, 127, 127),
+    (199, 199, 199),
+    (188, 189, 34),
+    (219, 219, 141),
+    (23, 190, 207),
+    (158, 218, 229),
+    (31, 119, 180)
+]
+
 metainfo = {
     'classes': classes,
     'taxonomy': taxonomy,
-    'palette': generate_palette(81),
+    'palette': palette
 }
+
+# train_pipeline = [
+#     dict(type='LoadImageFromFile', backend_args=backend_args),
+#     dict(type='LoadAnnotations', with_bbox=True),
+#     dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+#     dict(type='RandomFlip', prob=0.5),
+#     dict(type='PackDetInputs')
+# ]
+# test_pipeline = [
+#     dict(type='LoadImageFromFile', backend_args=backend_args),
+#     dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+#     # If you don't have a gt annotation, delete the pipeline
+#     dict(type='LoadAnnotations', with_bbox=True),
+#     dict(
+#         type='PackDetInputs',
+#         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+#                    'scale_factor'))
+# ]
+# train_dataloader = dict(
+#     batch_size=2,
+#     num_workers=2,
+#     persistent_workers=True,
+#     sampler=dict(type='DefaultSampler', shuffle=True),
+#     batch_sampler=dict(type='AspectRatioBatchSampler'),
+#     dataset=dict(
+#         type=dataset_type,
+#         data_root=data_root,
+#         ann_file='aircraft_train.json',
+#         data_prefix=dict(img=''),
+#         filter_cfg=dict(filter_empty_gt=True, min_size=32),
+#         pipeline=train_pipeline,
+#         backend_args=backend_args))
 train_dataloader = dict(
-    batch_size=2,
-    num_workers=2,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
-    batch_sampler=dict(type='AspectRatioBatchSampler'),
     dataset=dict(
-        type=dataset_type,
+        # type=dataset_type,
         data_root=data_root,
         metainfo=metainfo,
         ann_file='aircraft_train.json',
-        data_prefix=dict(img=''),
-        filter_cfg=dict(filter_empty_gt=True, min_size=32),
-        pipeline=train_pipeline,
-        backend_args=backend_args))
+        data_prefix=dict(img='')))
+# val_dataloader = dict(
+#     batch_size=1,
+#     num_workers=2,
+#     persistent_workers=True,
+#     drop_last=False,
+#     sampler=dict(type='DefaultSampler', shuffle=False),
+#     dataset=dict(
+#         type=dataset_type,
+#         data_root=data_root,
+#         ann_file='aircraft_validation.json',
+#         data_prefix=dict(img=''),
+#         test_mode=True,
+#         pipeline=test_pipeline,
+#         backend_args=backend_args))
 val_dataloader = dict(
-    batch_size=1,
-    num_workers=2,
-    persistent_workers=True,
-    drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
-        type=dataset_type,
+        # type=dataset_type,
         data_root=data_root,
         metainfo=metainfo,
         ann_file='aircraft_validation.json',
-        data_prefix=dict(img=''),
-        test_mode=True,
-        pipeline=test_pipeline,
-        backend_args=backend_args))
-test_dataloader = val_dataloader
-test_dataloader.update(dict(
-    dataset=dict(
-        ann_file=data_root + 'aircraft_test.json',
-        data_prefix=dict(img=''),
-    )
-))
+        data_prefix=dict(img='')))
 
 val_evaluator = dict(
-    type='HierarchicalCocoMetric',
-    taxonomy=metainfo['taxonomy'],
+    type='CocoMetric',
     ann_file=data_root + 'aircraft_validation.json',
     metric='bbox',
     format_only=False,
     backend_args=backend_args)
-test_evaluator = val_evaluator
-test_evaluator.update(dict(
+
+# test_dataloader = dict(
+#     batch_size=1,
+#     num_workers=2,
+#     persistent_workers=True,
+#     drop_last=False,
+#     sampler=dict(type='DefaultSampler', shuffle=False),
+#     dataset=dict(
+#         type=dataset_type,
+#         data_root=data_root,
+#         ann_file=data_root + 'aircraft_test.json',
+#         data_prefix=dict(img=''),
+#         test_mode=True,
+#         pipeline=test_pipeline,
+#         backend_args=backend_args))
+test_dataloader = dict(
+    dataset=dict(
+        # type=dataset_type,
+        data_root=data_root,
+        metainfo=metainfo,
+        ann_file='aircraft_test.json',
+        data_prefix=dict(img='')))
+test_evaluator = dict(
+    type='CocoMetric',
+    metric='bbox',
     format_only=True,
     ann_file=data_root + 'aircraft_test.json',
-    outfile_prefix='./outputs/results/test',
-))
+    outfile_prefix='./outputs/aircraft_detection/test',
+    backend_args=backend_args)

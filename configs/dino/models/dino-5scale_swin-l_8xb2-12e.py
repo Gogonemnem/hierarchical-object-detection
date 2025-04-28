@@ -1,4 +1,4 @@
-_base_ = './dino-4scale_r50_8xb2-12e_coco.py'
+_base_ = './dino-4scale_r50_8xb2-12e.py'
 
 pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_large_patch4_window12_384_22k.pth'  # noqa
 num_levels = 5
