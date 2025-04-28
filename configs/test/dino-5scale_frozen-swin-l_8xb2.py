@@ -28,6 +28,7 @@ model_wrapper_cfg = dict(
     find_unused_parameters=True
 )
 
+
 model = dict(
     backbone=dict(
         frozen_stages=4,
@@ -154,4 +155,3 @@ test_evaluator = dict(
     ann_file=data_root + 'aircraft_test.json', # for CocoMetric
     outfile_prefix='./outputs/results/test'
     )
-
