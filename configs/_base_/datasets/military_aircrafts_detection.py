@@ -1,56 +1,39 @@
-_base_ = [
-    '../dino/dino-4scale_r50_8xb2-36e_coco.py'
-]
-
-custom_imports = dict(imports=['hod.evaluation', 'hod.models'], allow_failed_imports=False)
-
-# learning policy
-max_epochs = 36
-train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
-
-param_scheduler = [
-    dict(
-        type='MultiStepLR',
-        begin=0,
-        end=max_epochs,
-        by_epoch=True,
-        milestones=[30],
-        gamma=0.1)
-]
-
-load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
-# load_from = "work_dirs/frozen-4scale_r50_improved_8xb2/epoch_19.pth"
-resume = False
-
-model_wrapper_cfg = dict(
-    type='MMDistributedDataParallel',
-    find_unused_parameters=True
-)
-
-model = dict(
-    backbone=dict(
-        frozen_stages=4,
-    ),
-    bbox_head=dict(
-        num_classes=81,
-    ),
-)
-
-
-import matplotlib.pyplot as plt
-
-def generate_palette(n):
-    cmap = plt.get_cmap("tab20")  # 20-color map for high contrast
-    colors = []
-    for i in range(n):
-        color = cmap(i % 20)  # cycle if more than 20
-        rgb = tuple(int(255 * c) for c in color[:3])
-        colors.append(rgb)
-    return colors
-
-# Modify dataset related settings
+# dataset settings
+dataset_type = 'CocoDataset'
 data_root = 'data/aircraft/'
+
+# Example to use different file client
+# Method 1: simply set the data root and let the file I/O module
+# automatically infer from prefix (not support LMDB and Memcache yet)
+
+# data_root = 's3://openmmlab/datasets/detection/coco/'
+
+# Method 2: Use `backend_args`, `file_client_args` in versions before 3.0.0rc6
+# backend_args = dict(
+#     backend='petrel',
+#     path_mapping=dict({
+#         './data/': 's3://openmmlab/datasets/detection/',
+#         'data/': 's3://openmmlab/datasets/detection/'
+#     }))
+backend_args = None
+
+train_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    dict(type='RandomFlip', prob=0.5),
+    dict(type='PackDetInputs')
+]
+test_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args),
+    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    # If you don't have a gt annotation, delete the pipeline
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                   'scale_factor'))
+]
 classes = (
         "A10", "A400M", "AG600", "AH64", "AV8B", "An124", "An22", "An225",
         "An72", "B1", "B2", "B21", "B52", "Be200", "C130", "C17", "C2",
@@ -159,50 +142,69 @@ taxonomy = {
         }
     }
 }
+import matplotlib.pyplot as plt
 
+def generate_palette(n):
+    cmap = plt.get_cmap("tab20")  # 20-color map for high contrast
+    colors = []
+    for i in range(n):
+        color = cmap(i % 20)  # cycle if more than 20
+        rgb = tuple(int(255 * c) for c in color[:3])
+        colors.append(rgb)
+    return colors
 metainfo = {
     'classes': classes,
     'taxonomy': taxonomy,
     'palette': generate_palette(81),
 }
-
 train_dataloader = dict(
     batch_size=2,
+    num_workers=2,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    batch_sampler=dict(type='AspectRatioBatchSampler'),
     dataset=dict(
+        type=dataset_type,
         data_root=data_root,
         metainfo=metainfo,
         ann_file='aircraft_train.json',
-        data_prefix=dict(img='')
-        )
-    )
+        data_prefix=dict(img=''),
+        filter_cfg=dict(filter_empty_gt=True, min_size=32),
+        pipeline=train_pipeline,
+        backend_args=backend_args))
 val_dataloader = dict(
     batch_size=1,
+    num_workers=2,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
+        type=dataset_type,
         data_root=data_root,
         metainfo=metainfo,
         ann_file='aircraft_validation.json',
-        data_prefix=dict(img='')
-        )
-    )
-
-test_dataloader = dict(
-    batch_size=10,
+        data_prefix=dict(img=''),
+        test_mode=True,
+        pipeline=test_pipeline,
+        backend_args=backend_args))
+test_dataloader = val_dataloader
+test_dataloader.update(dict(
     dataset=dict(
-        data_root=data_root,
-        metainfo=metainfo,
-        ann_file='aircraft_test.json',
-        data_prefix=dict(img='')
-        )
+        ann_file=data_root + 'aircraft_test.json',
+        data_prefix=dict(img=''),
     )
+))
 
-# Modify metric related settings
 val_evaluator = dict(
-    type='CocoMetric', # 'PRFMetric',
-    ann_file=data_root + 'aircraft_validation.json' # for CocoMetric
-    )
-test_evaluator = dict(
-    type='PRFMetric',
+    type='HierarchicalCocoMetric',
     taxonomy=metainfo['taxonomy'],
-    ann_file=data_root + 'aircraft_test.json', # for CocoMetric
-    outfile_prefix='./outputs/results/test'
-    )
+    ann_file=data_root + 'aircraft_validation.json',
+    metric='bbox',
+    format_only=False,
+    backend_args=backend_args)
+test_evaluator = val_evaluator
+test_evaluator.update(dict(
+    format_only=True,
+    ann_file=data_root + 'aircraft_test.json',
+    outfile_prefix='./outputs/results/test',
+))
