@@ -1,5 +1,5 @@
 _base_ = [
-    './dino-4scale_r50_improved_8xb2'
+    './dino-4scale_r50_improved_8xb2.py'
 ]
 
 model = dict(
