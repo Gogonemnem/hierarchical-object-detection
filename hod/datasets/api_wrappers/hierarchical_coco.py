@@ -2,12 +2,12 @@ from collections import defaultdict
 import copy
 import datetime
 import time
+from typing import Dict
 
 import numpy as np
 from pycocotools import mask as maskUtils
 
 from mmdet.datasets.api_wrappers import COCOeval
-from pycocotools.cocoeval import Params as _Params
 
 from hod.utils.tree import HierarchyTree
 
