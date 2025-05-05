@@ -3,11 +3,11 @@ import tempfile
 from collections import OrderedDict
 from typing import Dict
 
-from mmdet.evaluation.metrics.coco_metric import CocoMetric
 from mmengine.fileio import load
 from mmengine.logging import MMLogger
 
-from mmdet.datasets.api_wrappers import COCO, COCOevalMP
+from mmdet.datasets.api_wrappers import COCO
+from mmdet.evaluation.metrics.coco_metric import CocoMetric
 from mmdet.registry import METRICS
 
 from hod.datasets.api_wrappers.hierarchical_coco import HierarchicalCOCOeval
@@ -15,13 +15,12 @@ from hod.datasets.api_wrappers.hierarchical_coco import HierarchicalCOCOeval
 @METRICS.register_module()
 class HierarchicalCocoMetric(CocoMetric):
     def __init__(self,
-                 taxonomy: dict,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.classwise = False
-        self.taxonomy = taxonomy
-    
+        self.taxonomy: dict = None
+
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.
 
@@ -57,6 +56,8 @@ class HierarchicalCocoMetric(CocoMetric):
                 cat_names=self.dataset_meta['classes'])
         if self.img_ids is None:
             self.img_ids = self._coco_api.get_img_ids()
+        if self.taxonomy is None:
+            self.taxonomy = self.dataset_meta['taxonomy']
 
         # convert predictions to coco format and dump to json file
         result_files = self.results2json(preds, outfile_prefix)
@@ -164,7 +165,7 @@ class HierarchicalCocoMetric(CocoMetric):
                 coco_eval.summarize()
 
                 # if metric_items is None:
-                
+
                 if metric_items is None:
                     #     metric_items = [
                     #         'mAP', 'mAP_50', 'mAP_75', 'mAP_s', 'mAP_m', 'mAP_l'
