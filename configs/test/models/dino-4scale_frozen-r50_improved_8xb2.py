@@ -3,7 +3,7 @@ _base_ = [
     '../dino/models/dino-4scale_r50_improved_8xb2-12e.py'
 ]
 
-custom_imports = dict(imports=['hod.evaluation', 'hod.models'], allow_failed_imports=False)
+custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
 
 # learning policy
 max_epochs = 36
@@ -53,9 +53,7 @@ test_dataloader = dict(
 # Modify metric related settings
 val_evaluator = dict(
     type='HierarchicalCocoMetric',
-    taxonomy=_base_.metainfo['taxonomy'],
     )
 test_evaluator = dict(
     type='HierarchicalCocoMetric',
-    taxonomy=_base_.metainfo['taxonomy'],
     )

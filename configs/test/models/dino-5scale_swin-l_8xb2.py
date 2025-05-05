@@ -3,7 +3,7 @@ _base_ = [
     '../dino/models/dino-5scale_swin-l_8xb2-36e.py'
 ]
 
-custom_imports = dict(imports=['hod.evaluation', 'hod.models'], allow_failed_imports=False)
+custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
 
 # learning policy
 max_epochs = 36
@@ -30,33 +30,27 @@ model_wrapper_cfg = dict(
 )
 
 model = dict(
-    backbone=dict(
-        frozen_stages=4,
-    ),
     bbox_head=dict(
         type='EmbeddingDINOHead',
         num_classes=81,
     ),
 )
 
-
 train_dataloader = dict(
     batch_size=1,
-    )
+)
 val_dataloader = dict(
     batch_size=1,
-    )
+)
 
 test_dataloader = dict(
     batch_size=10,
-    )
+)
 
 # Modify metric related settings
 val_evaluator = dict(
     type='HierarchicalCocoMetric',
-    taxonomy=_base_.metainfo['taxonomy'],
     )
 test_evaluator = dict(
     type='HierarchicalCocoMetric',
-    taxonomy=_base_.metainfo['taxonomy'],
     )
