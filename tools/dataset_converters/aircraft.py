@@ -41,7 +41,17 @@ def group_annotations_by_image(rows):
         split_to_images[split][fname]['annotations'].append(row)
     return split_to_images
 
-def cvt_to_coco_json(split_to_images, subtract_one=True):
+def flatten_taxonomy(taxonomy, parent=None, out=None):
+    """Walk the nested taxonomy, collect (node_name, parent_name) pairs."""
+    if out is None:
+        out = []
+    for node, children in taxonomy.items():
+        out.append((node, parent or "none"))
+        # recurse
+        flatten_taxonomy(children, node, out)
+    return out
+
+def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
     """
     Convert grouped annotations into COCO format.
     If subtract_one is True, subtract 1 from bounding box coordinates.
@@ -53,58 +63,124 @@ def cvt_to_coco_json(split_to_images, subtract_one=True):
             "Fixed-Wing Aircraft": {
                 "Combat Aircraft": {
                     "Fighters and Multirole": {
-                        "American Fighters": ["F-4", "F-14", "F-15", "F-16", "F/A-18", "F-117", "F-22", "F-35", "YF-23"],
-                        "Russian Fighters": ["MiG-29", "MiG-31", "Su-57"],
-                        "Western Fighters": ["JAS-39", "Mirage2000", "Rafale", "EF-2000", "Tornado"],
-                        "Asian Fighters": ["J-10", "J-20", "J-35", "JF-17", "JH-7", "KF-21", "KAAN"]
+                        "American Fighters": {
+                            "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}
+                        },
+                        "Russian Fighters": {
+                            "Mig29": {}, "Mig31": {}, "Su57": {}
+                        },
+                        "Western Fighters": {
+                            "JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}
+                        },
+                        "Asian Fighters": {
+                            "J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}
+                        }
                     },
-                    "Attack Aircraft": ["A-10", "AV-8B", "EMB-314", "Su-25"],
+                    "Attack Aircraft": {
+                        "A10": {}, "AV8B": {}, "EMB314": {}, "Su25": {}
+                    },
                     "Bombers": {
-                        "American Bombers": ["B-1", "B-2", "B-21", "B-52", "XB-70"],
-                        "Russian Bombers": ["Tu-160", "Tu-22M", "Tu-95", "Su-24", "Su-34"],
-                        "Chinese Bombers": ["H-6"],
-                        "British Bombers": ["Vulcan"]
+                        "American Bombers": {
+                            "B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}
+                        },
+                        "Russian Bombers": {
+                            "Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}
+                        },
+                        "Chinese Bombers": {
+                            "H6": {}
+                        },
+                        "British Bombers": {
+                            "Vulcan": {}
+                        }
                     },
                     "Reconnaissance and Surveillance": {
-                        "Airborne Early Warning": ["E-2", "E-7"],
-                        "High Altitude Reconnaissance": ["SR-71", "U-2"],
-                        "Maritime Patrol": ["P-3", "KJ-600", "WZ-7"]
+                        "Airborne Early Warning": {
+                            "E2": {}, "E7": {}, "KJ600": {}
+                        },
+                        "High Altitude Reconnaissance": {
+                            "SR71": {}, "U2": {}
+                        },
+                        "Maritime Patrol": {
+                            "P3": {}, "WZ7": {}
+                        }
                     }
                 },
                 "Transport and Utility": {
                     "Cargo Transports": {
-                        "American Cargo Transports": ["C-130", "C-17", "C-2", "C-5", "KC-135"],
-                        "European Cargo Transports": ["A-400M"],
-                        "Latin American Cargo Transports": ["C-390"],
-                        "Russian Cargo Transports": ["An-124", "An-22", "An-225", "An-72", "Il-76"],
-                        "Chinese Cargo Transports": ["Y-20"]
+                        "American Cargo Transports": {
+                            "C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}
+                        },
+                        "European Cargo Transports": {
+                            "A400M": {}
+                        },
+                        "Latin American Cargo Transports": {
+                            "C390": {}
+                        },
+                        "Russian Cargo Transports": {
+                            "An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}
+                        },
+                        "Chinese Cargo Transports": {
+                            "Y20": {}
+                        }
                     },
-                    "Amphibious Aircraft": ["US-2", "AG-600", "Be-200", "CL-415"]
+                    "Amphibious Aircraft": {
+                        "AG600": {}, "Be200": {}, "CL415": {}, "US2": {}
+                    }
                 }
             },
             "Rotorcraft": {
-                "Attack Helicopters": ["AH-64", "Ka-52", "Mi-24", "Mi-28", "Z-10"],
+                "Attack Helicopters": {
+                    "AH64": {}, "Ka52": {}, "Mi24": {}, "Mi28": {}, "Z10": {}
+                },
                 "Utility and Transport Helicopters": {
-                    "Land-Based Helicopters": ["CH-47", "Mi-8", "UH-60"],
-                    "Naval and Specialized Helicopters": ["Ka-27", "Z-19"]
+                    "Land-Based Helicopters": {
+                        "CH47": {}, "Mi8": {}, "Mi26": {}, "UH60": {}
+                    },
+                    "Naval and Specialized Helicopters": {
+                        "Ka27": {}, "Z19": {}
+                    }
                 }
             },
             "Unmanned Aerial Vehicles": {
-                "Combat and Reconnaissance Drones": ["MQ-9", "RQ-4"],
-                "Tactical UAVs": ["TB-001", "TB-2"]
+                "Combat and Reconnaissance Drones": {
+                    "MQ9": {}, "RQ4": {}
+                },
+                "Tactical UAVs": {
+                    "TB001": {}, "TB2": {}
+                }
             },
-            "Tiltrotor Aircraft": ["V-22", "V-280"]
+            "Tiltrotor Aircraft": {
+                "V22": {}, "V280": {}
+            }
         }
     }
-
-    # Gather unique categories from the CSV
-    categories_set = set()
-    for images in split_to_images.values():
-        for info in images.values():
-            for ann in info['annotations']:
-                categories_set.add(ann['class'])
-    categories_list = sorted(list(categories_set))
-    label_ids = {cat: idx for idx, cat in enumerate(categories_list)}
+    if use_all_nodes:
+        # flatten your METAINFO['taxonomy']
+        flat = flatten_taxonomy(taxonomy)
+        # give each an id
+        categories_list = [n for n, p in flat]
+        supers = {n: p for n, p in flat}
+        label_ids = {c: i for i, c in enumerate(categories_list)}
+        coco_cats = []
+        for name, idx in label_ids.items():
+            coco_cats.append({
+                "id": idx,
+                "name": name,
+                "supercategory": supers[name]
+            })
+    else:
+        # Gather unique categories from the CSV
+        categories_set = set()
+        for images in split_to_images.values():
+            for info in images.values():
+                for ann in info['annotations']:
+                    categories_set.add(ann['class'])
+        categories_list = sorted(list(categories_set))
+        label_ids = {cat: idx for idx, cat in enumerate(categories_list)}
+        coco_cats = [
+            {"id": label_ids[c], "name": c, "supercategory": "none"}
+            for c in categories_list
+        ]
 
     # Prepare COCO JSONs per split
     coco_files = {}
@@ -112,18 +188,11 @@ def cvt_to_coco_json(split_to_images, subtract_one=True):
         coco = {
             'images': [],
             'annotations': [],
-            'categories': [],
+            'categories': coco_cats,
             'type': 'instance',
             # Add taxonomy metadata here:
             'taxonomy': taxonomy
         }
-        # Build the categories list (adjust 'supercategory' if needed)
-        for cat, idx in label_ids.items():
-            coco['categories'].append({
-                'supercategory': 'none',  # or set a high-level parent if you wish
-                'id': idx,
-                'name': cat
-            })
         image_id = 0
         ann_id = 0
         for fname, info in images.items():
@@ -184,12 +253,17 @@ def main():
         action='store_true',
         help='Subtract 1 from bounding box coordinates (default: False)'
     )
+    parser.add_argument(
+        '--use_all_nodes',
+        action='store_true',
+        help='Include every intermediate taxonomy node as its own class'
+    )
     args = parser.parse_args()
 
     # Parse CSV and group annotations by image and split.
     rows = parse_csv(args.csv_file)
     split_to_images = group_annotations_by_image(rows)
-    coco_files = cvt_to_coco_json(split_to_images, subtract_one=args.subtract_one)
+    coco_files = cvt_to_coco_json(split_to_images, subtract_one=args.subtract_one, use_all_nodes=args.use_all_nodes)
 
     mkdir_or_exist(args.out_dir)
     for split, coco in coco_files.items():

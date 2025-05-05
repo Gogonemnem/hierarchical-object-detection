@@ -19,6 +19,9 @@ class HierarchyNode:
             node = node.parent
             path.append(node.name)
         return path[::-1]
+    
+    def __repr__(self) -> str:
+        return self.name
 
 
 class HierarchyTree:
@@ -37,8 +40,7 @@ class HierarchyTree:
         return HierarchyNode(name, children)
 
     def _register_nodes(self, node: HierarchyNode) -> None:
-        if node.is_leaf():
-            self.class_to_node[node.name] = node
+        self.class_to_node[node.name] = node            
         for child in node.children:
             self._register_nodes(child)
 
@@ -53,3 +55,11 @@ class HierarchyTree:
 
     def all_classes(self) -> List[str]:
         return list(self.class_to_node.keys())
+    
+    def max_depth(self) -> int:
+        depths = []
+        for name, node in self.class_to_node.items():
+            if node.is_leaf():
+                depths.append(self.get_depth(name))
+        return max(depths)
+
