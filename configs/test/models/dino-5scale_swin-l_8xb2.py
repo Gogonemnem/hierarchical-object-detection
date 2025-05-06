@@ -1,6 +1,6 @@
 _base_ = [
-    './datasets/aircraft_detection.py',
-    '../dino/models/dino-5scale_swin-l_8xb2-36e.py'
+    '../datasets/aircraft_detection.py',
+    '../../dino/models/dino-5scale_swin-l_8xb2-36e.py'
 ]
 
 custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
