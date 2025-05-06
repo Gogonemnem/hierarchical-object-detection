@@ -11,17 +11,13 @@ from hod.utils.tree import HierarchyTree
 @MODELS.register_module()
 class HierarchicalFocalLoss(FocalCustomLoss):
     def __init__(self,
-                 alpha=0.5,
-                 gamma=0.0,
-                 use_sigmoid=False,
                  ann_file='',
                  **ce_kwargs):
         """
         ce_kwargs are forwarded to CrossEntropyCustomLoss,
         e.g. `num_classes=len(class_to_idx)`, `ignore_index=...`, etc.
         """
-        super().__init__(use_sigmoid=use_sigmoid, **ce_kwargs)
-        self.alpha = alpha
+        super().__init__(**ce_kwargs)
         # we'll keep a little cache of each parent-child index list
         self._siblings_cache = {}
         self.load_taxonomy(ann_file)
@@ -88,13 +84,13 @@ class HierarchicalFocalLoss(FocalCustomLoss):
             self.level_weights.append(w)
 
         max_depth = self.class_depth.max()  # Find the maximum depth
-        # class_level_weight = torch.exp(-self.alpha * (max_depth - self.class_depth))  # shape (C,)
+        class_level_weight = torch.exp(-self.alpha * (max_depth - self.class_depth))  # shape (C,)
         # class_level_weight = torch.exp(-self.alpha * self.class_depth)  # shape (C,)
-        class_level_weight = torch.ones_like(self.class_depth) # shape (C,)
-        # depths_for_norm = torch.arange(max_depth + 1, device=device)
+        # class_level_weight = torch.ones_like(self.class_depth) # shape (C,)
 
-        # norm = torch.exp(-self.alpha * depths_for_norm).sum()
-        norm = max_depth
+        depths_for_norm = torch.arange(max_depth + 1, device=device)
+        norm = torch.exp(-self.alpha * depths_for_norm).sum()
+        # norm = max_depth
 
         # Normalize weights, handling potential division by zero or very small norm
         if norm > 1e-6:
@@ -112,31 +108,21 @@ class HierarchicalFocalLoss(FocalCustomLoss):
         else:
             return self.forward_softmax(cls_score, labels, weight, **kwargs)
 
-    def forward_sigmoid(self, cls_score, labels, weight=None, **kwargs):
-        # shape: (N, C)  *no+bg column*  
-        N,C = cls_score.shape
-        device = cls_score.device
-
-        # drop ignored and background‐labels in one go
-        if self.ignore_index is None or self.ignore_index < 0:
-            valid = torch.ones_like(labels, dtype=torch.bool)
-        else:
-            valid = (labels != self.ignore_index)
-        valid = valid #& (labels != C)  # drop background labels
-        labs  = labels[valid]                   # (N_valid,)
+    def forward_sigmoid(self, logits, labels, weight=None, **kwargs):
         # cls_labels is an (M,) LongTensor of the ground‐truth labels in [0..C−1]`
-        targets = self.dt_path_mask[labs]     # (M, C), bool
+        # Multilabel
+        targets = self.dt_path_mask[labels]     # (M, C), bool
+        
+        # Single label
         # targets = F.one_hot(labs, num_classes=C+1)  # (M, C+1), bool
         # targets = targets[:, :C]
-        # raise Exception(targets, self.dt_path_mask[labs])
         # targets = targets.float()            # convert to float
 
-        logits = cls_score[valid]               # (N_valid, C)
         losses = py_sigmoid_focal_loss(
             logits,
             targets.float(),
             weight=None,
-            gamma=2.0,
+            gamma=self.gamma,
             alpha=self.alpha,
             reduction='none',
             avg_factor=None,
@@ -159,22 +145,6 @@ class HierarchicalFocalLoss(FocalCustomLoss):
             assert weight.ndim == weighted_loss.ndim
         loss = weight_reduce_loss(weighted_loss, weight=weight, reduction='mean', avg_factor=kwargs.get('avg_factor'))
         return self.loss_weight * loss
-        # probs  = logits.sigmoid()               # (N_valid, C), in [0,1]
-
-        # total_loss = 0.0
-        # total_w    = 0.0
-        # losses = F.binary_cross_entropy_with_logits(
-        #     logits, targets.float(),
-        #     weight=None,                         # no per‐pixel weight
-        #     pos_weight=None,                     # (C,) if you have
-        #     reduction='none'                     # → (M,C)
-        # )
-        # # class_level_weight is (C,)
-        # weighted = losses * self.class_level_weight  # (M,C) broadcast
-        # loss = weighted.mean()                       # or .sum() / weighted.numel()
-        # # raise Exception(loss, losses, self.loss_weight * loss)
-        # res = self.loss_weight * loss
-        # return res
     
     def forward_softmax(self, cls_score, labels, weight, **kwargs):
         N, Cplus1 = cls_score.shape
