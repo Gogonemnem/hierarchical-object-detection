@@ -1,4 +1,4 @@
-from typing import List, Dict, Union, Optional, Any
+from typing import List, Dict, Optional, Any
 
 class HierarchyNode:
     def __init__(self, name: str, children: Optional[List['HierarchyNode']] = None, 
@@ -19,9 +19,15 @@ class HierarchyNode:
             node = node.parent
             path.append(node.name)
         return path[::-1]
-    
+
     def __repr__(self) -> str:
         return self.name
+    def __eq__(self, other: 'HierarchyNode') -> bool:
+        return self.name == other.name and self.children == other.children
+    def __lt__(self, other: 'HierarchyNode') -> bool:
+        return self.name < other.name
+    def __hash__(self) -> int:
+        return hash(self.name) ^ hash(tuple(self.children))
 
 
 class HierarchyTree:
@@ -55,7 +61,7 @@ class HierarchyTree:
 
     def all_classes(self) -> List[str]:
         return list(self.class_to_node.keys())
-    
+
     def max_depth(self) -> int:
         depths = []
         for name, node in self.class_to_node.items():
@@ -63,3 +69,5 @@ class HierarchyTree:
                 depths.append(self.get_depth(name))
         return max(depths)
 
+    def get_leaf_nodes(self) -> List[HierarchyNode]:
+        return [node for node in self.class_to_node.values() if node.is_leaf()]
