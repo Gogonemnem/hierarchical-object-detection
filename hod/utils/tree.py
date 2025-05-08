@@ -19,6 +19,22 @@ class HierarchyNode:
             node = node.parent
             path.append(node.name)
         return path[::-1]
+    
+    def get_depth(self) -> int:
+        """
+        Returns the depth of the class in the hierarchy.
+        The depth is defined as the number of edges from the root to the class.
+        """
+        return len(self.ancestors())
+
+    def get_height(self) -> int:
+        """
+        Returns the height of the subtree rooted at this node.
+        The height is defined as the number of edges from the node to the deepest leaf.
+        """
+        if self.is_leaf():
+            return 0
+        return 1 + max(child.get_height() for child in self.children)
 
     def __repr__(self) -> str:
         return self.name
@@ -53,21 +69,11 @@ class HierarchyTree:
     def get_ancestors(self, cls_name: str) -> List[str]:
         return self.class_to_node[cls_name].ancestors()
 
-    def get_depth(self, cls_name: str) -> int:
-        return len(self.get_ancestors(cls_name))
-
     def get_path(self, cls_name: str) -> List[str]:
         return self.get_ancestors(cls_name) + [cls_name]
 
     def all_classes(self) -> List[str]:
         return list(self.class_to_node.keys())
-
-    def max_depth(self) -> int:
-        depths = []
-        for name, node in self.class_to_node.items():
-            if node.is_leaf():
-                depths.append(self.get_depth(name))
-        return max(depths)
 
     def get_leaf_nodes(self) -> List[HierarchyNode]:
         return [node for node in self.class_to_node.values() if node.is_leaf()]
