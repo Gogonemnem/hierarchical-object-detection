@@ -33,11 +33,11 @@ model = dict(
     bbox_head=dict(
         type='EmbeddingDINOHead',
         num_classes=116,
+        ann_file=data_root + 'aircraft_test.json',
         loss_cls=dict(
             type='HierarchicalFocalLoss',
             ann_file=data_root + 'aircraft_test.json',
-            use_sigmoid=True,
-            num_classes=116,)
+            decay=2,)
     ),
 )
 
