@@ -39,6 +39,20 @@ model = dict(
             ann_file=data_root + 'aircraft_test.json',
             decay=2,)
     ),
+    # training and testing settings
+    train_cfg=dict(
+        assigner=dict(
+            type='HungarianAssigner',
+            match_costs=[
+                dict(
+                    type='HierarchicalFocalLossCost',
+                    weight=2.0,
+                    ann_file=data_root + 'aircraft_test.json',
+                    decay=2,
+                ),
+                dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
+                dict(type='IoUCost', iou_mode='giou', weight=2.0)
+            ])),
 )
 
 train_dataloader = dict(
