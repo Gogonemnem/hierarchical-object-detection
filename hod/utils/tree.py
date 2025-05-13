@@ -19,7 +19,19 @@ class HierarchyNode:
             node = node.parent
             path.append(node.name)
         return path[::-1]
-    
+
+    def descendants(self) -> List[str]:
+        """
+        Returns a list of all descendant class names.
+        """
+        descendants = []
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            descendants.append(node.name)
+            stack.extend(node.children)
+        return descendants
+
     def get_depth(self) -> int:
         """
         Returns the depth of the class in the hierarchy.
@@ -68,6 +80,9 @@ class HierarchyTree:
 
     def get_ancestors(self, cls_name: str) -> List[str]:
         return self.class_to_node[cls_name].ancestors()
+
+    def get_descendants(self, cls_name: str) -> List[str]:
+        return self.class_to_node[cls_name].descendants()
 
     def get_path(self, cls_name: str) -> List[str]:
         return self.get_ancestors(cls_name) + [cls_name]

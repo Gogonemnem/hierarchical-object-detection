@@ -34,10 +34,17 @@ model = dict(
         type='EmbeddingDINOHead',
         num_classes=116,
         ann_file=data_root + 'aircraft_test.json',
+        cls_cone_beta=0.1,
+        cls_cone_eps=1e-6,
+        cls_init_norm_upper_offset=0.5,
+        loss_embed=dict(
+                     type='EntailmentConeLoss',
+                     euclidean=True,
+                     loss_weight=1.0),
         loss_cls=dict(
             type='HierarchicalFocalLoss',
             ann_file=data_root + 'aircraft_test.json',
-            decay=2,)
+            decay=3,)
     ),
     # training and testing settings
     train_cfg=dict(
@@ -48,7 +55,7 @@ model = dict(
                     type='HierarchicalFocalLossCost',
                     weight=2.0,
                     ann_file=data_root + 'aircraft_test.json',
-                    decay=2,
+                    decay=3,
                 ),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
@@ -68,7 +75,7 @@ val_dataloader = dict(
     )
 )
 test_dataloader = dict(
-    batch_size=10,
+    batch_size=1,
     dataset = dict(
         ann_file='hierarchical/aircraft_test.json',
     )

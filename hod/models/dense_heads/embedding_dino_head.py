@@ -7,22 +7,55 @@ from mmengine.structures import InstanceData
 from mmdet.registry import MODELS
 from mmdet.models.dense_heads import DINOHead
 from mmdet.structures.bbox import bbox_cxcywh_to_xyxy
+from mmdet.utils import OptConfigType
 
 from hod.models.layers import EmbeddingClassifier
 from hod.utils import HierarchyTree
 
 @MODELS.register_module()
 class EmbeddingDINOHead(DINOHead):
-    def __init__(self, ann_file='', *args, **kwargs):
+    def __init__(self,
+                 ann_file='',
+                 cls_cone_beta=0.1,
+                 cls_cone_eps=1e-6,
+                 cls_init_norm_upper_offset=0.5,
+                 loss_embed: OptConfigType=None,
+                 **kwargs):
         """
         Args:
             ann_file (str): Path to the annotation file containing the
                 taxonomy. The file should be in COCO format.
+            cls_cone_beta (float): Beta parameter for the cone loss.
+            cls_cone_eps (float): Epsilon parameter for the cone loss.
+            cls_init_norm_upper_offset (float): Upper offset for the
+                initialization norm.
+            loss_embed (dict, optional): Configuration for the
+                embedding loss.
+                Defaults to None (disabled).
+                Example config:
+                loss_entail=dict(
+                    type='EntailmentConeLoss',
+                    num_negative_samples_per_positive=1,
+                    euclidean=True,
+                    loss_weight=1.0
+                    margin=0.1,
         """
-        super().__init__(*args, **kwargs)
+        self.beta = cls_cone_beta
+        self.cone_eps = cls_cone_eps
+        self.init_norm_upper_offset = cls_init_norm_upper_offset
+        self.cls_use_cone = loss_embed and isinstance(loss_embed, dict) and loss_embed.get('loss_weight', 0.0) > 0
+
+        super().__init__(**kwargs)
+
         self.tree = None
         self.load_taxonomy(ann_file)
         self._build_parent_children_index_map()
+
+        if self.cls_use_cone:
+            loss_entail_cfg = loss_embed.copy()
+            loss_entail_cfg['beta'] = cls_cone_beta
+            loss_entail_cfg['ann_file'] = ann_file
+            self.loss_entail = MODELS.build(loss_entail_cfg)
 
     def load_taxonomy(self, ann_file):
         ann = load(ann_file)
@@ -53,13 +86,32 @@ class EmbeddingDINOHead(DINOHead):
     def _init_layers(self, *args) -> None:
         """Initialize classification branch of head."""
         super()._init_layers(*args)
-        fc_cls = EmbeddingClassifier(self.embed_dims, self.cls_out_channels)
+        fc_cls = EmbeddingClassifier(self.embed_dims,
+                                     self.cls_out_channels,
+                                     use_cone=self.cls_use_cone,
+                                     cone_beta=self.beta,
+                                     cone_eps=self.cone_eps,
+                                     init_norm_upper_offset=self.init_norm_upper_offset,)
 
         # if self.share_pred_layer:
         # Unlike standard DINO, we do NOT create separate classifiers per layer
         # to preserve semantic consistency across layers in embedding space.
         self.cls_branches = nn.ModuleList(
             [fc_cls for _ in range(self.num_pred_layer)])
+
+    def loss(self, **kwargs):
+        # normal DINO losses
+        loss_dict = super().loss(**kwargs)
+        if not self.cls_use_cone:
+            return loss_dict
+
+        # === entailment‑cone loss (no image data needed) ===========
+        prototypes = self.cls_branches[0].prototypes   # [C, d]
+        entail_loss = self.loss_entail(prototypes)
+        # Multiply by the number of prediction layers to get the total loss for consistency
+        entail_loss *= self.num_pred_layer
+        loss_dict['loss_entail'] = entail_loss
+        return loss_dict
 
     def _get_empty_results(self, device):
         results = InstanceData()
