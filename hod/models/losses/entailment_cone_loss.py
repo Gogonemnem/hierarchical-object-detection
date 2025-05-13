@@ -17,16 +17,16 @@ class EntailmentConeLoss(nn.Module):
     """
     def __init__(self,
                  ann_file='',
+                 curvature=0.0,
                  beta=0.1,
-                 euclidean=True,
                  loss_weight=1.0,
                  margin=0.1,  # For max-margin loss
                  num_negative_samples_per_positive=1 # Num negatives per positive
                  ):
         super().__init__()
 
+        self.curvature = curvature
         self.beta = beta
-        self.euclidean = euclidean
         self.loss_weight = loss_weight
         self.margin = margin
         self.num_negative_samples = num_negative_samples_per_positive
@@ -175,35 +175,43 @@ class EntailmentConeLoss(nn.Module):
         return final_loss * self.loss_weight
 
 
-    def _calculate_energy(self, p_embed: torch.Tensor, c_embed: torch.Tensor):
+    def _calculate_energy(self, parent_embed: torch.Tensor, child_embed: torch.Tensor):
         # p_embed: [N, d]
         # c_embed: [N, d]
-        if self.euclidean:
-            ang = self.apex_angle(p_embed, c_embed)
-            norm_p = p_embed.norm(dim=-1)
-            aperture = torch.arcsin(
-                torch.clamp(self.beta / (norm_p + 1e-6), 0, 1 - 1e-6))
-        else:
-            px = p_embed.norm(dim=-1)
-            cx = c_embed.norm(dim=-1)
-            dot = (p_embed * c_embed).sum(-1)
-            num = dot * (1 + px**2) - px**2 * (1 + cx**2)
-            den_sq_arg = (1 + px**2 * cx**2 - 2 * dot)
-            den = px * torch.norm(p_embed - c_embed, dim=-1) * (den_sq_arg.clamp(min=0)).sqrt()
-            cosang = num / (den + 1e-6)
-            cosang = torch.clamp(cosang, -1 + 1e-6, 1 - 1e-6)
-            ang = torch.acos(cosang)
-            aperture = torch.arcsin(
-                torch.clamp(self.beta * (1 - px**2) / (px + 1e-6), 0, 1-1e-6))
-
-        energy = torch.relu(ang - aperture)
-
+        angle = self.apex_angle(parent_embed, child_embed)
+        aperture = self.aperture(parent_embed)
+        energy = torch.relu(angle - aperture)
         return energy
 
-    def apex_angle(self, p: torch.Tensor, c: torch.Tensor, eps: float = 1e-6):
-        """Exact Euclidean cone angle Ξ(p,c).  Shapes: [...,d]."""
-        diff = c - p
-        num = (c.pow(2).sum(-1) - p.pow(2).sum(-1) - diff.pow(2).sum(-1))
-        denom = 2 * p.norm(dim=-1) * diff.norm(dim=-1) + eps
-        cosang = torch.clamp(num / denom, -1 + eps, 1 - eps)
-        return torch.acos(cosang)          # [... ]
+    def apex_angle(self, parent: torch.Tensor, child: torch.Tensor, eps: float = 1e-6):
+        """Cone angle Ξ(p,c).  Shapes: [...,d]."""
+        p_norm = parent.norm(dim=-1)
+
+        if self.curvature == 0.0:
+            diff = child - parent
+            num = (child.pow(2).sum(-1) - parent.pow(2).sum(-1) - diff.pow(2).sum(-1))
+            denom = 2 * p_norm * diff.norm(dim=-1)
+
+        elif self.curvature == -1.0:
+            c_norm = child.norm(dim=-1)
+            dot = (parent * child).sum(-1)
+            num = dot * (1 + p_norm**2) - p_norm**2 * (1 + c_norm**2)
+
+            omega = p_norm * torch.norm(parent - child, dim=-1)
+            den_sq_arg = 1 + p_norm**2 * c_norm**2 - 2 * dot
+            denom = omega * (den_sq_arg.clamp(min=0)).sqrt()
+
+        else:
+            raise NotImplementedError("Curvature must be 0 or -1")
+
+        cosang = torch.clamp(num / (denom+eps), -1 + eps, 1 - eps)
+        return torch.acos(cosang)
+
+    def aperture(self, parent: torch.Tensor, eps: float = 1e-6):
+        """Cone aperture Ψ(p).  Shapes: [...,d]."""
+        p_norm = parent.norm(dim=-1)
+
+        aperture = self.beta / (p_norm + eps)
+        if self.curvature == -1.0:
+            aperture *= (1 - p_norm**2)
+        return torch.asin(torch.clamp(aperture, 0, 1 - eps))

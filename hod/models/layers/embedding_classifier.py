@@ -12,9 +12,9 @@ class EmbeddingClassifier(nn.Module):
     def __init__(self,
                  in_features,
                  out_features,
+                 curvature: float=0.0,
                  use_cone: bool=False,
                  cone_beta: float=0.1,
-                 cone_eps: float=1e-6,
                  init_norm_upper_offset: float=0.5,
                  device=None,
                  dtype=None,
@@ -24,16 +24,18 @@ class EmbeddingClassifier(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.use_cone = use_cone
-        self.metric = 'euclidean'  # or 'hyperbolic'
+        assert curvature <= 0.0, "curvature must be == 0.0 (Euclidean space) or -1.0 (Hyperbolic Poincaré space)"
+        self.curvature = curvature
 
         assert cone_beta > 0, "cone_beta must be positive"
-        assert cone_eps > 0, "cone_eps must be positive"
-        assert init_norm_upper_offset > cone_eps, "init_norm_upper_offset must be greater than cone_eps"
         self.cone_beta = cone_beta
-        self.cone_eps = cone_eps
-        
+
         # Calculate the runtime minimum norm threshold
-        self.runtime_min_norm_threshold = self.cone_beta + self.cone_eps
+        if curvature == 0.0:
+            self.runtime_min_norm_threshold = self.cone_beta
+        elif curvature == -1.0:
+            self.runtime_min_norm_threshold = (2*cone_beta) /(1+math.sqrt(1.0 + 4*cone_beta**2))
+
         self.reset_parameters(init_norm_upper_offset)
 
         self.projection = nn.Linear(in_features, in_features, device=device, dtype=dtype)
@@ -59,7 +61,12 @@ class EmbeddingClassifier(nn.Module):
                 # 2b. Determine target norm range for initialization
                 # Lower bound for init is the same as runtime min norm threshold
                 init_lower_norm_bound = self.runtime_min_norm_threshold
-                init_upper_norm_bound = self.cone_beta + init_norm_upper_offset
+                if self.curvature == 0.0:
+                    init_upper_norm_bound = self.cone_beta + init_norm_upper_offset
+                elif self.curvature == -1.0:
+                    init_upper_norm_bound = 1
+                else:
+                    raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
 
                 # 2c. Generate random scales in this range for each embedding
                 scales = torch.rand(self.embeddings.shape[0], 1, device=self.embeddings.device, dtype=self.embeddings.dtype) * \
@@ -72,10 +79,19 @@ class EmbeddingClassifier(nn.Module):
 
     @property
     def prototypes(self):
+        embeddings = self.embeddings
+        if self.curvature < 0.0:
+            embeddings = self.expmap0(embeddings, self.curvature)
         if self.use_cone:
-            # Apply runtime minimum norm clipping before returning embeddings
-            return self._apply_min_norm_clipping(self.embeddings)
-        return self.embeddings
+            embeddings = self._apply_min_norm_clipping(embeddings)
+        return embeddings
+
+    def expmap0(self, x: torch.Tensor, c: float = -1.0, eps: float = 1e-5):
+        # x: (..., d) unconstrained in ℝᵈ
+        x_norm = torch.clamp(torch.norm(x, dim=-1, keepdim=True), min=eps)
+        curve_norm = torch.sqrt(-c) * x_norm
+        scale = torch.tanh(curve_norm) / curve_norm
+        return scale * x
 
     def _apply_min_norm_clipping(self, tensor_to_clip: torch.Tensor) -> torch.Tensor:
         """Clips tensor rows to have a minimum L2 norm."""
@@ -98,10 +114,41 @@ class EmbeddingClassifier(nn.Module):
     def forward(self, features):  # (bs, num_queries, dim)]
         features = self.projection(features)
 
+        if self.curvature < 0.0:
+            # Hyperbolic space
+            features = self.expmap0(features, self.curvature)
+
         # Use the .prototypes property, which handles runtime min-norm clipping
         current_prototypes = self.prototypes
 
-        dists = torch.cdist(features, current_prototypes.unsqueeze(0), p=2)
+        if self.curvature == 0.0:
+            dists = torch.cdist(features, current_prototypes.unsqueeze(0), p=2)
+        elif self.curvature == -1.0:
+            dists = self.pairwise_poincare_distance(features.unsqueeze(1), current_prototypes.unsqueeze(0))
+        else:
+            raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
         scale = self.logit_scale.exp().clamp(max=100)
         logits = -dists * scale
         return logits
+
+    def pairwise_poincare_distance(self, x, y, eps=1e-5):
+        # x: (B, N, D)
+        # y: (C, D)
+        B, N, D = x.shape
+        C = y.shape[0]
+        x_exp = x.unsqueeze(2)         # (B, N, 1, D)
+        y_exp = y.unsqueeze(0).unsqueeze(0)  # (1, 1, C, D)
+        diff = x_exp - y_exp           # (B, N, C, D)
+
+        x_norm_sq = (x_exp**2).sum(dim=-1, keepdim=True)  # (B, N, 1, 1)
+        y_norm_sq = (y_exp**2).sum(dim=-1, keepdim=True)  # (1, 1, C, 1)
+        diff_norm_sq = (diff**2).sum(dim=-1, keepdim=True)  # (B, N, C, 1)
+
+        num = 2 * diff_norm_sq
+        denom = (1 - x_norm_sq) * (1 - y_norm_sq)
+        denom = torch.clamp(denom, min=eps)
+
+        argument = 1 + num / denom
+        argument = torch.clamp(argument, min=1.0 + eps)
+        dist = torch.acosh(argument)
+        return dist.squeeze(-1)  # (B, N, C)

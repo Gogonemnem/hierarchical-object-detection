@@ -16,8 +16,8 @@ from hod.utils import HierarchyTree
 class EmbeddingDINOHead(DINOHead):
     def __init__(self,
                  ann_file='',
+                 cls_curvature=0.0,
                  cls_cone_beta=0.1,
-                 cls_cone_eps=1e-6,
                  cls_init_norm_upper_offset=0.5,
                  loss_embed: OptConfigType=None,
                  **kwargs):
@@ -25,23 +25,22 @@ class EmbeddingDINOHead(DINOHead):
         Args:
             ann_file (str): Path to the annotation file containing the
                 taxonomy. The file should be in COCO format.
+            cls_curvature (float): Curvature parameter for the embedding space.
             cls_cone_beta (float): Beta parameter for the cone loss.
-            cls_cone_eps (float): Epsilon parameter for the cone loss.
             cls_init_norm_upper_offset (float): Upper offset for the
-                initialization norm.
+                initialization norm in Euclidean Space.
             loss_embed (dict, optional): Configuration for the
                 embedding loss.
                 Defaults to None (disabled).
                 Example config:
                 loss_entail=dict(
                     type='EntailmentConeLoss',
-                    num_negative_samples_per_positive=1,
-                    euclidean=True,
                     loss_weight=1.0
+                    num_negative_samples_per_positive=1,
                     margin=0.1,
         """
+        self.curvature = cls_curvature
         self.beta = cls_cone_beta
-        self.cone_eps = cls_cone_eps
         self.init_norm_upper_offset = cls_init_norm_upper_offset
         self.cls_use_cone = loss_embed and isinstance(loss_embed, dict) and loss_embed.get('loss_weight', 0.0) > 0
 
@@ -54,6 +53,7 @@ class EmbeddingDINOHead(DINOHead):
         if self.cls_use_cone:
             loss_entail_cfg = loss_embed.copy()
             loss_entail_cfg['beta'] = cls_cone_beta
+            loss_entail_cfg['curvature'] = cls_curvature
             loss_entail_cfg['ann_file'] = ann_file
             self.loss_entail = MODELS.build(loss_entail_cfg)
 
@@ -88,9 +88,9 @@ class EmbeddingDINOHead(DINOHead):
         super()._init_layers(*args)
         fc_cls = EmbeddingClassifier(self.embed_dims,
                                      self.cls_out_channels,
+                                     curvature=self.curvature,
                                      use_cone=self.cls_use_cone,
                                      cone_beta=self.beta,
-                                     cone_eps=self.cone_eps,
                                      init_norm_upper_offset=self.init_norm_upper_offset,)
 
         # if self.share_pred_layer:
