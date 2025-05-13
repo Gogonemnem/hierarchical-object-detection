@@ -36,13 +36,12 @@ class EmbeddingClassifier(nn.Module):
         elif curvature == -1.0:
             self.runtime_min_norm_threshold = (2*cone_beta) /(1+math.sqrt(1.0 + 4*cone_beta**2))
 
-        self.reset_parameters(init_norm_upper_offset)
-
         self.projection = nn.Linear(in_features, in_features, device=device, dtype=dtype)
         self.embeddings = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
             )
         self.logit_scale = nn.Parameter(torch.tensor(1.0).log())  # log(1.0) = 0.0
+        self.reset_parameters(init_norm_upper_offset)
 
     def reset_parameters(self, init_norm_upper_offset=None) -> None:
         # 1. Initial Kaiming uniform initialization
@@ -89,7 +88,7 @@ class EmbeddingClassifier(nn.Module):
     def expmap0(self, x: torch.Tensor, c: float = -1.0, eps: float = 1e-5):
         # x: (..., d) unconstrained in ℝᵈ
         x_norm = torch.clamp(torch.norm(x, dim=-1, keepdim=True), min=eps)
-        curve_norm = torch.sqrt(-c) * x_norm
+        curve_norm = torch.sqrt(torch.tensor(-c)) * x_norm
         scale = torch.tanh(curve_norm) / curve_norm
         return scale * x
 
@@ -124,7 +123,7 @@ class EmbeddingClassifier(nn.Module):
         if self.curvature == 0.0:
             dists = torch.cdist(features, current_prototypes.unsqueeze(0), p=2)
         elif self.curvature == -1.0:
-            dists = self.pairwise_poincare_distance(features.unsqueeze(1), current_prototypes.unsqueeze(0))
+            dists = self.pairwise_poincare_distance(features, current_prototypes.unsqueeze(0))
         else:
             raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
         scale = self.logit_scale.exp().clamp(max=100)
@@ -133,11 +132,11 @@ class EmbeddingClassifier(nn.Module):
 
     def pairwise_poincare_distance(self, x, y, eps=1e-5):
         # x: (B, N, D)
-        # y: (C, D)
+        # y: (1, C, D)
         B, N, D = x.shape
         C = y.shape[0]
         x_exp = x.unsqueeze(2)         # (B, N, 1, D)
-        y_exp = y.unsqueeze(0).unsqueeze(0)  # (1, 1, C, D)
+        y_exp = y.unsqueeze(0)         # (1, 1, C, D)
         diff = x_exp - y_exp           # (B, N, C, D)
 
         x_norm_sq = (x_exp**2).sum(dim=-1, keepdim=True)  # (B, N, 1, 1)
