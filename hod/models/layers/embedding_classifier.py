@@ -123,31 +123,40 @@ class EmbeddingClassifier(nn.Module):
         if self.curvature == 0.0:
             dists = torch.cdist(features, current_prototypes.unsqueeze(0), p=2)
         elif self.curvature == -1.0:
-            dists = self.pairwise_poincare_distance(features, current_prototypes.unsqueeze(0))
+            dists = self.pairwise_poincare_distance(features, current_prototypes)
         else:
             raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
         scale = self.logit_scale.exp().clamp(max=100)
         logits = -dists * scale
         return logits
 
-    def pairwise_poincare_distance(self, x, y, eps=1e-5):
-        # x: (B, N, D)
-        # y: (1, C, D)
+    def pairwise_poincare_distance(self, x, y, eps=1e-5,
+                                   chunk_size: int | None = None):
+        """
+        x : (B, N, D)
+        y : (C, D)      -- *no* batch dim needed, broadcast is free
+        Returns : (B, N, C)
+        Optional `chunk_size` lets you trade a bit of speed for a lower peak‑RAM.
+        """
         B, N, D = x.shape
         C = y.shape[0]
-        x_exp = x.unsqueeze(2)         # (B, N, 1, D)
-        y_exp = y.unsqueeze(0)         # (1, 1, C, D)
-        diff = x_exp - y_exp           # (B, N, C, D)
+        x_norm_sq = (x.square()).sum(-1, keepdim=True)       # (B, N, 1)
+        y_norm_sq = (y.square()).sum(-1, keepdim=True)       # (C, 1)
 
-        x_norm_sq = (x_exp**2).sum(dim=-1, keepdim=True)  # (B, N, 1, 1)
-        y_norm_sq = (y_exp**2).sum(dim=-1, keepdim=True)  # (1, 1, C, 1)
-        diff_norm_sq = (diff**2).sum(dim=-1, keepdim=True)  # (B, N, C, 1)
+        def _compute(x_norm_sq, y_norm_sq, y_block):
+            dot   = torch.einsum('bnd,cd->bnc', x, y_block)  # (B, N, C')
+            diff2 = x_norm_sq + y_norm_sq.t() - 2.0 * dot    # (B, N, C')
+            num   = 2.0 * diff2
+            denom = (1 - x_norm_sq) * (1 - y_norm_sq.t())
+            denom = denom.clamp_min(eps)
+            arg   = 1 + num / denom
+            return torch.acosh(arg.clamp_min(1.0 + eps))     # (B, N, C')
 
-        num = 2 * diff_norm_sq
-        denom = (1 - x_norm_sq) * (1 - y_norm_sq)
-        denom = torch.clamp(denom, min=eps)
-
-        argument = 1 + num / denom
-        argument = torch.clamp(argument, min=1.0 + eps)
-        dist = torch.acosh(argument)
-        return dist.squeeze(-1)  # (B, N, C)
+        if chunk_size is None:
+            return _compute(x_norm_sq, y_norm_sq, y)         # full matrix
+        else:
+            outs = []
+            for i in range(0, C, chunk_size):
+                y_blk = y[i:i+chunk_size]
+                outs.append(_compute(x_norm_sq, y_norm_sq[i:i+chunk_size], y_blk))
+            return torch.cat(outs, dim=2)
