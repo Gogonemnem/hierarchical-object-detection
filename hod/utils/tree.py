@@ -92,3 +92,6 @@ class HierarchyTree:
 
     def get_leaf_nodes(self) -> List[HierarchyNode]:
         return [node for node in self.class_to_node.values() if node.is_leaf()]
+    
+    def __len__(self) -> int:
+        return len(self.class_to_node)

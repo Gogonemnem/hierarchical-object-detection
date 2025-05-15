@@ -44,11 +44,11 @@ class EmbeddingDINOHead(DINOHead):
         self.init_norm_upper_offset = cls_init_norm_upper_offset
         self.cls_use_cone = loss_embed and isinstance(loss_embed, dict) and loss_embed.get('loss_weight', 0.0) > 0
 
-        super().__init__(**kwargs)
-
         self.tree = None
         self.load_taxonomy(ann_file)
         self._build_parent_children_index_map()
+
+        super().__init__(**kwargs)
 
         if self.cls_use_cone:
             loss_entail_cfg = loss_embed.copy()
@@ -86,12 +86,19 @@ class EmbeddingDINOHead(DINOHead):
     def _init_layers(self, *args) -> None:
         """Initialize classification branch of head."""
         super()._init_layers(*args)
+        full_taxonomy = len(self.tree) == self.cls_out_channels
+        clip_exempt = None
+        if full_taxonomy:
+            root_idx  = self.class_to_idx[self.tree.root.name]
+            clip_exempt = [root_idx]
+
         fc_cls = EmbeddingClassifier(self.embed_dims,
                                      self.cls_out_channels,
                                      curvature=self.curvature,
                                      use_cone=self.cls_use_cone,
                                      cone_beta=self.beta,
-                                     init_norm_upper_offset=self.init_norm_upper_offset,)
+                                     init_norm_upper_offset=self.init_norm_upper_offset,
+                                     clip_exempt_indices=clip_exempt,)
 
         # if self.share_pred_layer:
         # Unlike standard DINO, we do NOT create separate classifiers per layer

@@ -1,3 +1,5 @@
+from typing import Dict, List, Set
+
 import torch
 import torch.nn as nn
 
@@ -8,210 +10,201 @@ from hod.utils import HierarchyTree
 
 @MODELS.register_module()
 class EntailmentConeLoss(nn.Module):
-    """Parent-child containment loss à la Ganea & Dhall.
+    r"""Parent-child containment loss à la Ganea & Dhall.
 
-    Args:
-        pairs (list[tuple[int,int]]): list of (parent_idx, child_idx)
-        beta (float): scale for the margin at the cone border.
-        euclidean (bool): if False, we treat the embeddings as Poincaré-ball.
+    Args
+    ----
+    ann_file : str
+        JSON annotation file that contains ``taxonomy`` and ``categories``.
+    curvature : {0.0, -1.0}
+        0 → Euclidean cone, -1 → Poincaré ball cone.
+    beta : float
+        Scale for the cone aperture.
+    loss_weight : float
+        Global multiplier.
+    margin : float
+        Margin for the max-margin term on negative pairs.
+    num_negative_samples_per_positive : int
+        How many negatives to draw per positive pair.
     """
-    def __init__(self,
-                 ann_file='',
-                 curvature=0.0,
-                 beta=0.1,
-                 loss_weight=1.0,
-                 margin=0.1,  # For max-margin loss
-                 num_negative_samples_per_positive=1 # Num negatives per positive
-                 ):
+    def __init__(
+        self,
+        ann_file: str,
+        curvature: float = 0.0,
+        beta: float = 0.1,
+        loss_weight: float = 1.0,
+        margin: float = 0.1,
+        num_negative_samples_per_positive: int = 5,
+    ):
         super().__init__()
 
+        # ---------------- static parameters ----------------------------------
         self.curvature = curvature
         self.beta = beta
         self.loss_weight = loss_weight
         self.margin = margin
-        self.num_negative_samples = num_negative_samples_per_positive
-        self.load_taxonomy(ann_file=ann_file)
-        self._build_parent_children_index_map()
+        self.num_neg = num_negative_samples_per_positive
 
-        # build the <parent,child> index list from your hierarchy
-        pairs = []
-        for p_idx, c_list in self._parent_idx_to_children_indices.items():
-            for c_idx in c_list:
-                pairs.append((p_idx, c_idx))
-        self.register_buffer(
-            '_pairs', torch.tensor(pairs, dtype=torch.long))
+        # ---------------- taxonomy -------------------------------------------
+        self._load_taxonomy(ann_file)
+        self._build_pairs_and_neg_candidates()
 
-        # This can be useful if not all prototype indices are actual classes you want to sample from
-        # For now, we'll primarily use arange(num_total_classes) for sampling pool
-        self._all_learnable_class_indices = []
-        if self.class_to_idx:
-             self._all_learnable_class_indices = list(self.class_to_idx.values())
-
-    def load_taxonomy(self, ann_file):
+    def _load_taxonomy(self, ann_file: str):
         ann = load(ann_file)
-        taxonomy = ann.get('taxonomy', {})
-        self.tree = HierarchyTree(taxonomy)
-        self.class_to_idx = {c['name']: c['id'] for c in ann['categories']}
-        self.idx_to_class = {c['id']: c['name'] for c in ann['categories']}
+        self.tree = HierarchyTree(ann.get('taxonomy', {}))
+        self.class2idx = {c["name"]: c["id"] for c in ann["categories"]}
+        self.idx2class = {v: k for k, v in self.class2idx.items()}
 
-    def _build_parent_children_index_map(self):
-        # Assumes self.tree and self.class_to_idx are populated
-        self._parent_idx_to_children_indices = {}
-        if not self.tree or not self.class_to_idx: # Guard
-            return
+    def _build_pairs_and_neg_candidates(self):
+        """Pre-compute
+        * self._pairs              - all (parent, child) LongTensor
+        """
+        pairs: List[List[int]] = []
+        neg_candidates: Dict[int, torch.Tensor] = {}
 
+        all_ids = torch.tensor(list(self.idx2class.keys()))  # [C]
+
+        root_name = self.tree.root.name
         for p_name, p_node in self.tree.class_to_node.items():
-            if p_name not in self.class_to_idx:
+            if p_name == root_name:              # ← skip the root
                 continue
-            p_idx = self.class_to_idx[p_name]
+            if p_name not in self.class2idx:
+                continue
+            p_idx = self.class2idx[p_name]
 
-            child_indices = []
-            for child_node in p_node.children:
-                if child_node.name in self.class_to_idx:
-                    child_indices.append(self.class_to_idx[child_node.name])
+            # ----- direct children -----
+            children = [
+                self.class2idx[c.name]
+                for c in p_node.children
+                if c.name in self.class2idx
+            ]
+            for c in children:
+                pairs.append([p_idx, c])
 
-            if child_indices: # Only add if it has mappable children
-                self._parent_idx_to_children_indices[p_idx] = child_indices
+            # ----- negatives: anything that is *not* p or its descendants ---
+            desc = {
+                self.class2idx[d]
+                for d in self.tree.get_descendants(p_name)
+                if d in self.class2idx
+            }
+            desc.add(p_idx)
+            mask = torch.ones_like(all_ids, dtype=torch.bool)
+            mask[list(desc)] = False
+            neg_candidates[p_idx] = all_ids[mask]
 
-    def _get_descendant_indices(self, parent_idx: int) -> set:
-        if not self.tree or parent_idx not in self.idx_to_class:
-            return set()
-
-        parent_name = self.idx_to_class[parent_idx]
-        descendant_names = self.tree.get_descendants(parent_name)
-
-        descendant_indices = set()
-        for name in descendant_names:
-            if name in self.class_to_idx:
-                descendant_indices.add(self.class_to_idx[name])
-        return descendant_indices
+        # register buffers
+        self.register_buffer("_pairs",
+                     torch.tensor(pairs, dtype=torch.long), persistent=False)
+        buf = [torch.as_tensor(neg_candidates.get(i, []), dtype=torch.long)
+            for i in range(len(self.idx2class))]
+        self.register_buffer("_neg_cand_flat", torch.cat(buf))      # 1-D
+        self.register_buffer("_neg_ptrs",
+                            torch.tensor([0] + [t.numel() for t in buf]).cumsum(0))
 
     def forward(self, prototypes: torch.Tensor) -> torch.Tensor:
-        if self._pairs.numel() == 0:
-            return torch.tensor(0.0, device=prototypes.device, dtype=prototypes.dtype)
+        if self._pairs.numel() == 0:  # degenerate tree
+            return prototypes.new_tensor(0.0)
 
-        num_total_classes = prototypes.shape[0]
-        all_class_indices_tensor = torch.arange(num_total_classes, device=prototypes.device)
+        num_cls = prototypes.size(0)
 
-        # --- 1. Positive Pair Loss (Vectorized) ---
-        # Get all parent and child indices from pre-computed pairs
-        pos_p_indices_all = self._pairs[:, 0]
-        pos_c_indices_all = self._pairs[:, 1]
+        # ---------------- positive energy -----------------------------------
+        valid_pos = (self._pairs < num_cls).all(dim=1)
+        if not valid_pos.any():
+            return prototypes.new_tensor(0.0)
 
-        # Filter out pairs with out-of-bounds indices for the current prototypes
-        valid_pos_mask = (pos_p_indices_all < num_total_classes) & (pos_c_indices_all < num_total_classes)
-        if not valid_pos_mask.any(): # No valid positive pairs for these prototypes
-            return torch.tensor(0.0, device=prototypes.device, dtype=prototypes.dtype)
+        pos = self._pairs[valid_pos]  # [N+, 2]
+        p_pos, c_pos = prototypes[pos[:, 0]], prototypes[pos[:, 1]]
+        pos_energy = self._calculate_energy(p_pos, c_pos).mean()
 
-        # Use only valid indices
-        pos_p_indices = pos_p_indices_all[valid_pos_mask]
-        pos_c_indices = pos_c_indices_all[valid_pos_mask]
-        
-        num_valid_positive_pairs = pos_p_indices.shape[0]
-        if num_valid_positive_pairs == 0: # Should be caught by valid_pos_mask.any() but good for safety
-             return torch.tensor(0.0, device=prototypes.device, dtype=prototypes.dtype)
-
-        p_embeds_pos = prototypes[pos_p_indices]  # [num_valid_positive_pairs, d]
-        c_embeds_pos = prototypes[pos_c_indices]  # [num_valid_positive_pairs, d]
-        
-        # Calculate average energy for valid positive pairs
-        avg_positive_loss = self._calculate_energy(p_embeds_pos, c_embeds_pos).mean()
-
-
-        # --- 2. Negative Pair Sampling and Index Collection ---
-        avg_negative_loss = torch.tensor(0.0, device=prototypes.device, dtype=prototypes.dtype)
-        
-        if self.num_negative_samples > 0 and num_total_classes > 1: # Need at least 2 classes to sample a different one
-            collected_neg_p_indices = [] # List to store parent indices for all negative pairs
-            collected_neg_c_indices = [] # List to store sampled negative child indices
-
-            # Loop through each valid positive pair to define the context for negative sampling
-            for i in range(num_valid_positive_pairs):
-                # Parent and true child for the current positive pair
-                current_p_idx_val = pos_p_indices[i].item() # scalar Python int for set operations
-                current_c_idx_val = pos_c_indices[i].item() # scalar Python int
-
-                descendant_indices_set = self._get_descendant_indices(current_p_idx_val)
-                # Non-candidates: parent itself, its true child from this positive pair, and all its other descendants
-                non_candidate_indices = descendant_indices_set.union({current_p_idx_val, current_c_idx_val})
-                
-                # Create a boolean mask for valid negative candidates from all_class_indices_tensor
-                valid_neg_selection_mask = torch.ones(num_total_classes, dtype=torch.bool, device=prototypes.device)
-                
-                if non_candidate_indices: # Ensure set is not empty
-                    # Filter non_candidate_list to only include valid indices within num_total_classes
-                    valid_non_candidates = [idx for idx in list(non_candidate_indices) if 0 <= idx < num_total_classes]
-                    if valid_non_candidates: # If there are valid indices to exclude
-                        valid_neg_selection_mask[valid_non_candidates] = False
-                
-                potential_neg_indices_for_p = all_class_indices_tensor[valid_neg_selection_mask]
-
-                if potential_neg_indices_for_p.numel() > 0:
-                    num_to_sample = min(self.num_negative_samples, potential_neg_indices_for_p.numel())
-                    
-                    perm = torch.randperm(potential_neg_indices_for_p.numel(), device=prototypes.device)
-                    sampled_neg_indices = potential_neg_indices_for_p[perm[:num_to_sample]] # Tensor of indices
-                    
-                    # Store the original parent tensor index (pos_p_indices[i]) repeated num_to_sample times
-                    collected_neg_p_indices.extend([pos_p_indices[i]] * num_to_sample)
-                    collected_neg_c_indices.extend(sampled_neg_indices) # sampled_neg_indices is already a list of tensors or a tensor
-
-            # --- 3. Negative Pair Loss (Batched, using collected indices) ---
-            if collected_neg_p_indices: # If any negative samples were collected
-                # Stack the collected lists of tensors into single tensors
-                neg_p_indices_tensor = torch.stack(collected_neg_p_indices)
-                neg_c_indices_tensor = torch.stack(collected_neg_c_indices)
-
-                p_embeds_neg = prototypes[neg_p_indices_tensor]
-                c_embeds_neg = prototypes[neg_c_indices_tensor]
-
-                negative_energies = self._calculate_energy(p_embeds_neg, c_embeds_neg)
-                margin_violations_neg = torch.relu(self.margin - negative_energies)
-                
-                avg_negative_loss = margin_violations_neg.mean()
-
-        # --- 4. Combine Losses ---
-        final_loss = (avg_positive_loss + avg_negative_loss) / 2
-        return final_loss * self.loss_weight
-
-
-    def _calculate_energy(self, parent_embed: torch.Tensor, child_embed: torch.Tensor):
-        # p_embed: [N, d]
-        # c_embed: [N, d]
-        angle = self.apex_angle(parent_embed, child_embed)
-        aperture = self.aperture(parent_embed)
-        energy = torch.relu(angle - aperture)
-        return energy
-
-    def apex_angle(self, parent: torch.Tensor, child: torch.Tensor, eps: float = 1e-6):
-        """Cone angle Ξ(p,c).  Shapes: [...,d]."""
-        p_norm = parent.norm(dim=-1)
-
-        if self.curvature == 0.0:
-            diff = child - parent
-            num = (child.pow(2).sum(-1) - parent.pow(2).sum(-1) - diff.pow(2).sum(-1))
-            denom = 2 * p_norm * diff.norm(dim=-1)
-
-        elif self.curvature == -1.0:
-            c_norm = child.norm(dim=-1)
-            dot = (parent * child).sum(-1)
-            num = dot * (1 + p_norm**2) - p_norm**2 * (1 + c_norm**2)
-
-            omega = p_norm * torch.norm(parent - child, dim=-1)
-            den_sq_arg = 1 + p_norm**2 * c_norm**2 - 2 * dot
-            denom = omega * (den_sq_arg.clamp(min=0)).sqrt()
-
+        # ---------------- negative energy -----------------------------------
+        if self.num_neg == 0 or num_cls == 1:
+            neg_energy = prototypes.new_tensor(0.0)
         else:
-            raise NotImplementedError("Curvature must be 0 or -1")
+            # pick unique parents → one sampling per parent
+            p_idx_unique = torch.unique(pos[:, 0])
+            neg_pairs = []  # will be cat'd later
 
-        cosang = torch.clamp(num / (denom+eps), -1 + eps, 1 - eps)
-        return torch.acos(cosang)
+            # sizes for each parent
+            sizes = self._neg_ptrs[p_idx_unique + 1] - self._neg_ptrs[p_idx_unique]
+            max_s = sizes.max()
 
-    def aperture(self, parent: torch.Tensor, eps: float = 1e-6):
-        """Cone aperture Ψ(p).  Shapes: [...,d]."""
-        p_norm = parent.norm(dim=-1)
+            # build a padded table [n_parent, max_s]
+            offsets = self._neg_ptrs[p_idx_unique]
+            table = torch.full((p_idx_unique.size(0), max_s),
+                            -1, dtype=torch.long, device=prototypes.device)
+            for row, (o, s) in enumerate(zip(offsets, sizes)):
+                table[row, :s] = self._neg_cand_flat[o:o+s]
 
-        aperture = self.beta / (p_norm + eps)
-        if self.curvature == -1.0:
-            aperture *= (1 - p_norm**2)
-        return torch.asin(torch.clamp(aperture, 0, 1 - eps))
+            # sample indices row-wise without replacement
+            n_parent = p_idx_unique.size(0)
+            rand  = torch.rand(n_parent, max_s, device=prototypes.device)      # (P, W)
+            order = rand.argsort(dim=1)[:, : self.num_neg]                     # (P, k)
+            # pick the columns row-wise
+            sel = table.gather(1, order)                                       # (P, k)
+
+            parents = p_idx_unique.repeat_interleave(self.num_neg)
+            neg_pairs = torch.stack([parents, sel.flatten()], 1)
+            neg_pairs = neg_pairs[neg_pairs[:, 1] >= 0]         # drop pads
+
+            if neg_pairs.numel():
+                p_neg, c_neg = (
+                    prototypes[neg_pairs[:, 0]],
+                    prototypes[neg_pairs[:, 1]],
+                )
+                neg_e = self._calculate_energy(p_neg, c_neg)
+                neg_energy = torch.relu(self.margin - neg_e).mean()
+            else:
+                neg_energy = prototypes.new_tensor(0.0)
+
+        return 0.5 * (pos_energy + neg_energy) * self.loss_weight
+
+    def _calculate_energy(self,
+                        parent: torch.Tensor,
+                        child: torch.Tensor,
+                        eps: float = 1e-6) -> torch.Tensor:
+        """
+        Vectorised cone energy in one pass.
+
+        Shapes
+        ------
+        parent, child : [..., d]
+
+        Returns
+        -------
+        energy : [... ]   # same leading dims, scalar per pair
+        """
+        p_norm = torch.norm(parent, dim=-1)
+
+        # ---------- apex angle ----------------------------------------------
+        diff      = child - parent
+        diff_norm = torch.norm(diff, dim=-1)
+
+        if self.curvature == 0.0:                        # ─ Euclidean ─
+            num        = (
+                torch.square(child).sum(-1)
+                - torch.square(parent).sum(-1)
+                - torch.square(diff).sum(-1)
+            )
+            denom = 2 * p_norm * diff_norm
+
+        elif self.curvature == -1.0:                     # ─ Poincaré ─
+            c_norm = torch.norm(child, dim=-1)
+            dot    = (parent * child).sum(-1)
+            num    = dot * (1 + p_norm**2) - p_norm**2 * (1 + c_norm**2)
+
+            omega  = p_norm * diff_norm
+            den_sq = 1 + p_norm**2 * c_norm**2 - 2 * dot
+            denom  = omega * torch.sqrt(torch.clamp(den_sq, min=0.0))
+        else:
+            raise NotImplementedError("curvature must be 0 or -1")
+
+        cosang = torch.clamp(num / (denom + eps), -1 + eps, 1 - eps)
+        angle  = torch.acos(cosang)
+
+        # ---------- aperture Ψ(p) -------------------------------------------
+        ap = self.beta / (p_norm + eps)
+        if self.curvature == -1.0:                       # Poincaré factor
+            ap = ap * (1 - p_norm**2)
+        aperture = torch.asin(torch.clamp(ap, 0.0, 1.0 - eps))
+
+        return torch.relu(angle - aperture)

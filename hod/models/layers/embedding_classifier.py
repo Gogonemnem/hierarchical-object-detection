@@ -3,6 +3,8 @@ import math
 import torch
 from torch import nn, Tensor
 
+from typing import List
+
 class EmbeddingClassifier(nn.Module):
     __constants__ = ["in_features", "out_features"]
     in_features: int
@@ -16,6 +18,7 @@ class EmbeddingClassifier(nn.Module):
                  use_cone: bool=False,
                  cone_beta: float=0.1,
                  init_norm_upper_offset: float=0.5,
+                 clip_exempt_indices: List[int] | None = None,
                  device=None,
                  dtype=None,
             ) -> None:
@@ -35,6 +38,7 @@ class EmbeddingClassifier(nn.Module):
             self.runtime_min_norm_threshold = self.cone_beta
         elif curvature == -1.0:
             self.runtime_min_norm_threshold = (2*cone_beta) /(1+math.sqrt(1.0 + 4*cone_beta**2))
+        self.clip_exempt = set(clip_exempt_indices or [])
 
         self.projection = nn.Linear(in_features, in_features, device=device, dtype=dtype)
         self.embeddings = nn.Parameter(
@@ -93,21 +97,42 @@ class EmbeddingClassifier(nn.Module):
         return scale * x
 
     def _apply_min_norm_clipping(self, tensor_to_clip: torch.Tensor) -> torch.Tensor:
-        """Clips tensor rows to have a minimum L2 norm."""
-        norms = tensor_to_clip.norm(dim=-1, keepdim=True)
-        # Only scale up if norm is > some tiny_eps to avoid scaling up zero vectors
+        """
+        Ensure every row of `W` has L2-norm ≥ runtime_min_norm_threshold,
+        except the indices listed in `self.clip_exempt`.
+
+        Parameters
+        ----------
+        tensor_to_clip : (C, d) tensor   - prototype matrix (may be a view!)
+
+        Returns
+        -------
+        (C, d) tensor with the same storage as `tensor_to_clip` if no clipping happened,
+        otherwise a cloned-and-modified copy (safe for autograd).
+        """
+        if not self.use_cone:                         # cone disabled → no clip
+            return tensor_to_clip
+
+        C = tensor_to_clip.size(0)
+        if not self.clip_exempt:                      # fast path, no exempt rows
+            exempt_mask = None
+        else:
+            exempt_mask = torch.zeros(
+                C, dtype=torch.bool, device=tensor_to_clip.device)
+            exempt_mask[list(self.clip_exempt)] = True
+
+        norms = tensor_to_clip.norm(dim=-1, keepdim=True)          # (C, 1)
         tiny_eps = 1e-12
-        needs_clipping_mask = (norms < self.runtime_min_norm_threshold) & (norms > tiny_eps)
+        needs_clip = (norms < self.runtime_min_norm_threshold) & (norms > tiny_eps)
+        if exempt_mask is not None:
+            needs_clip &= ~exempt_mask.unsqueeze(1)   # skip exempt rows
 
-        # Use .detach() for scaling_factor if you don't want this op to affect gradients
-        # However, the Ganea code implies the clipping is part of the forward pass that affects gradients.
-        scaling_factor = self.runtime_min_norm_threshold / norms.clamp(min=tiny_eps)
+        if not needs_clip.any():                      # nothing to do
+            return tensor_to_clip
 
-        clipped_tensor = torch.where(
-            needs_clipping_mask,
-            tensor_to_clip * scaling_factor,
-            tensor_to_clip
-        )
+        scale = self.runtime_min_norm_threshold / norms.clamp(min=tiny_eps)
+        scaled = tensor_to_clip * scale                            # same shape
+        clipped_tensor = torch.where(needs_clip, scaled, tensor_to_clip)
         return clipped_tensor
 
     def forward(self, features):  # (bs, num_queries, dim)]
