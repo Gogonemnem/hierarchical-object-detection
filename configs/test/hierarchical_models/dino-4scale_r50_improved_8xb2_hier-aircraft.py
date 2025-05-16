@@ -35,15 +35,11 @@ model = dict(
         num_classes=116,
         ann_file=data_root + 'aircraft_test.json',
         cls_curvature=-1.0,
-        cls_cone_beta=0.1,
-        cls_init_norm_upper_offset=0.5,
-        # loss_embed=dict(
-        #              type='EntailmentConeLoss',
-        #              loss_weight=1.0),
+        share_cls_layer=True,
         loss_cls=dict(
             type='HierarchicalFocalLoss',
             ann_file=data_root + 'aircraft_test.json',
-            decay=2,)
+            decay=3,)
     ),
     # training and testing settings
     train_cfg=dict(
@@ -54,7 +50,7 @@ model = dict(
                     type='HierarchicalFocalLossCost',
                     weight=2.0,
                     ann_file=data_root + 'aircraft_test.json',
-                    decay=2,
+                    decay=3,
                 ),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)

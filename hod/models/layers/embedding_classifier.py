@@ -1,9 +1,10 @@
 import math
+from typing import List
 
 import torch
 from torch import nn, Tensor
+from torch.nn.parameter import Parameter
 
-from typing import List
 
 class EmbeddingClassifier(nn.Module):
     __constants__ = ["in_features", "out_features"]
@@ -14,6 +15,7 @@ class EmbeddingClassifier(nn.Module):
     def __init__(self,
                  in_features,
                  out_features,
+                 bias: bool=True,
                  curvature: float=0.0,
                  use_cone: bool=False,
                  cone_beta: float=0.1,
@@ -30,7 +32,8 @@ class EmbeddingClassifier(nn.Module):
         assert curvature <= 0.0, "curvature must be == 0.0 (Euclidean space) or -1.0 (Hyperbolic Poincaré space)"
         self.curvature = curvature
 
-        assert cone_beta > 0, "cone_beta must be positive"
+        if use_cone:
+            assert cone_beta > 0, "cone_beta must be positive"
         self.cone_beta = cone_beta
 
         # Calculate the runtime minimum norm threshold
@@ -44,12 +47,19 @@ class EmbeddingClassifier(nn.Module):
         self.embeddings = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
             )
+        if bias:
+            self.geometric_bias = Parameter(torch.empty(1, **factory_kwargs))
+        else:
+            self.register_parameter("geometric_bias", None)
         self.logit_scale = nn.Parameter(torch.tensor(1.0).log())  # log(1.0) = 0.0
         self.reset_parameters(init_norm_upper_offset)
 
     def reset_parameters(self, init_norm_upper_offset=None) -> None:
         # 1. Initial Kaiming uniform initialization
         nn.init.kaiming_uniform_(self.embeddings, a=math.sqrt(5))
+        if self.geometric_bias is not None:
+            nn.init.constant_(self.geometric_bias, 9.0)
+            # nn.init.uniform_(self.geometric_bias, a=5, b=15)
 
         if not self.use_cone:
             return
@@ -136,19 +146,24 @@ class EmbeddingClassifier(nn.Module):
         return clipped_tensor
 
     def forward(self, features):  # (bs, num_queries, dim)]
-        features = self.projection(features)
+        features = self.get_projected_features(features)
+        logits = self.get_distance_logits(features, self.prototypes)
+        # Add the bias if it exists
+        if self.geometric_bias is not None:
+            logits = logits + self.geometric_bias # bias (shape [1]) will broadcast
+        return logits
 
+    def get_projected_features(self, x: Tensor) -> Tensor:
+        x = self.projection(x)
         if self.curvature < 0.0:
-            # Hyperbolic space
-            features = self.expmap0(features, self.curvature)
+            x = self.expmap0(x, self.curvature)
+        return x
 
-        # Use the .prototypes property, which handles runtime min-norm clipping
-        current_prototypes = self.prototypes
-
+    def get_distance_logits(self, features, embeddings):
         if self.curvature == 0.0:
-            dists = torch.cdist(features, current_prototypes.unsqueeze(0), p=2)
+            dists = torch.cdist(features, embeddings.unsqueeze(0), p=2)
         elif self.curvature == -1.0:
-            dists = self.pairwise_poincare_distance(features, current_prototypes)
+            dists = self.pairwise_poincare_distance(features, embeddings)
         else:
             raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
         scale = self.logit_scale.exp().clamp(max=100)

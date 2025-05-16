@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -17,8 +19,7 @@ class EmbeddingDINOHead(DINOHead):
     def __init__(self,
                  ann_file='',
                  cls_curvature=0.0,
-                 cls_cone_beta=0.1,
-                 cls_init_norm_upper_offset=0.5,
+                 share_cls_layer=True,
                  loss_embed: OptConfigType=None,
                  **kwargs):
         """
@@ -26,36 +27,48 @@ class EmbeddingDINOHead(DINOHead):
             ann_file (str): Path to the annotation file containing the
                 taxonomy. The file should be in COCO format.
             cls_curvature (float): Curvature parameter for the embedding space.
-            cls_cone_beta (float): Beta parameter for the cone loss.
-            cls_init_norm_upper_offset (float): Upper offset for the
-                initialization norm in Euclidean Space.
+            share_cls_layer (bool): Whether to share the classification
+                layer across all prediction layers.
             loss_embed (dict, optional): Configuration for the
                 embedding loss.
                 Defaults to None (disabled).
                 Example config:
-                loss_entail=dict(
+                loss_embed=dict(
                     type='EntailmentConeLoss',
+                    cone_beta=0.1,
+                    init_norm_upper_offset=0.5,
                     loss_weight=1.0
                     num_negative_samples_per_positive=1,
                     margin=0.1,
+                or:
+                loss_embed=dict(
+                    type='HierarchicalContrastiveLoss',
+                    loss_weight=1.0,
+                    decay=1.0,
+                )
         """
         self.curvature = cls_curvature
-        self.beta = cls_cone_beta
-        self.init_norm_upper_offset = cls_init_norm_upper_offset
-        self.cls_use_cone = loss_embed and isinstance(loss_embed, dict) and loss_embed.get('loss_weight', 0.0) > 0
-
+        self.share_cls_layer = share_cls_layer
+        use_embed_loss = loss_embed and isinstance(loss_embed, dict)
+        self.use_cone = use_embed_loss and loss_embed.get('type', None) == "EntailmentConeLoss" and loss_embed.get('loss_weight', 0.0) > 0
+        self.use_contrastive = use_embed_loss and loss_embed.get('type', None) == "HierarchicalContrastiveLoss" and loss_embed.get('loss_weight', 0.0) > 0
         self.tree = None
         self.load_taxonomy(ann_file)
         self._build_parent_children_index_map()
-
+            
+        self.beta = 0.0
+        self.init_norm_upper_offset = 0.0
+        if self.use_cone:
+            self.beta = loss_embed['beta']
+            self.init_norm_upper_offset = loss_embed['init_norm_upper_offset']
         super().__init__(**kwargs)
 
-        if self.cls_use_cone:
-            loss_entail_cfg = loss_embed.copy()
-            loss_entail_cfg['beta'] = cls_cone_beta
-            loss_entail_cfg['curvature'] = cls_curvature
-            loss_entail_cfg['ann_file'] = ann_file
-            self.loss_entail = MODELS.build(loss_entail_cfg)
+        if self.use_cone:
+            loss_embed['curvature'] = cls_curvature
+        
+        if use_embed_loss:
+            loss_embed['ann_file'] = ann_file
+            self.loss_embed = MODELS.build(loss_embed)
 
     def load_taxonomy(self, ann_file):
         ann = load(ann_file)
@@ -95,29 +108,63 @@ class EmbeddingDINOHead(DINOHead):
         fc_cls = EmbeddingClassifier(self.embed_dims,
                                      self.cls_out_channels,
                                      curvature=self.curvature,
-                                     use_cone=self.cls_use_cone,
+                                     use_cone=self.use_cone,
                                      cone_beta=self.beta,
                                      init_norm_upper_offset=self.init_norm_upper_offset,
                                      clip_exempt_indices=clip_exempt,)
 
-        # if self.share_pred_layer:
-        # Unlike standard DINO, we do NOT create separate classifiers per layer
-        # to preserve semantic consistency across layers in embedding space.
-        self.cls_branches = nn.ModuleList(
-            [fc_cls for _ in range(self.num_pred_layer)])
+        if self.share_cls_layer:
+            self.cls_branches = nn.ModuleList(
+                [fc_cls for _ in range(self.num_pred_layer)])
+        else:
+            self.cls_branches = nn.ModuleList(
+                [copy.deepcopy(fc_cls) for _ in range(self.num_pred_layer)])
 
     def loss(self, **kwargs):
         # normal DINO losses
         loss_dict = super().loss(**kwargs)
-        if not self.cls_use_cone:
-            return loss_dict
+        if self.use_cone:
+            # === entailment‑cone loss (no image data needed) ===========
+            if self.share_cls_layer:
+                # All classification branches are identical when shared.
+                # Use the first branch's prototypes for loss calculation.
+                prototypes = self.cls_branches[0].prototypes
+                base_entail_loss = self.loss_embed(prototypes)
+                # Scale the single loss by the number of prediction layers.
+                loss_dict['loss_entail'] = base_entail_loss * self.num_pred_layer
+            else:
+                # Each classification branch has its own distinct prototypes.
+                # Calculate and store loss for each layer.
+                for i, cls_branch in enumerate(self.cls_branches):
+                    prototypes = cls_branch.prototypes
+                    entail_loss = self.loss_embed(prototypes)
+                    # The last layer's loss is typically named 'loss_entail',
+                    # while intermediate layers are prefixed (e.g., 'd0.loss_entail').
+                    loss_key = 'loss_entail' if i == self.num_pred_layer - 1 else f'd{i}.loss_entail'
+                    loss_dict[loss_key] = entail_loss
 
-        # === entailment‑cone loss (no image data needed) ===========
-        prototypes = self.cls_branches[0].prototypes   # [C, d]
-        entail_loss = self.loss_entail(prototypes)
-        # Multiply by the number of prediction layers to get the total loss for consistency
-        entail_loss *= self.num_pred_layer
-        loss_dict['loss_entail'] = entail_loss
+        if self.use_contrastive:
+            # === contrastive loss (no image data needed) ===========
+            if self.share_cls_layer:
+                # All classification branches are identical when shared.
+                # Use the first branch's prototypes for loss calculation.
+                prototypes = self.cls_branches[0].prototypes
+                distance_matrix = self.cls_branches[0].get_distance_logits(prototypes.unsqueeze(0), prototypes)
+                contrastive_loss = self.loss_embed(distance_matrix.squeeze(0))
+                # Scale the single loss by the number of prediction layers.
+                loss_dict['loss_contrastive'] = contrastive_loss * self.num_pred_layer
+            else:
+                # Each classification branch has its own distinct prototypes.
+                # Calculate and store loss for each layer.
+                for i, cls_branch in enumerate(self.cls_branches):
+                    prototypes = cls_branch.prototypes
+                    distance_matrix = cls_branch.get_distance_logits(prototypes.unsqueeze(0), prototypes)
+                    contrastive_loss = self.loss_embed(distance_matrix.squeeze(0))
+                    # The last layer's loss is typically named 'loss_contrastive',
+                    # while intermediate layers are prefixed (e.g., 'd0.loss_contrastive').
+                    loss_key = 'loss_contrastive' if i == self.num_pred_layer - 1 else f'd{i}.loss_contrastive'
+                    loss_dict[loss_key] = contrastive_loss
+
         return loss_dict
 
     def _get_empty_results(self, device):

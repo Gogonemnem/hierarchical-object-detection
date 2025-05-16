@@ -2,8 +2,7 @@ import torch
 
 from mmengine.fileio import load
 from mmdet.registry import MODELS
-from mmdet.models.losses.focal_loss import FocalLoss
-from mmdet.models.losses.focal_loss import py_sigmoid_focal_loss
+from mmdet.models.losses.focal_loss import FocalLoss, py_sigmoid_focal_loss
 
 from hod.utils.tree import HierarchyTree
 
