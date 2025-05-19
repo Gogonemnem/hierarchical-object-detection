@@ -27,7 +27,8 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m pip install --upgrade pip
 
 # Install MMEngine and MMCV
-RUN pip install openmim ipykernel kaggle seaborn umap-learn && \
+RUN pip install openmim ipykernel kaggle seaborn umap-learn \
+    git+https://github.com/bethgelab/imagecorruptions.git@c959e659c9713837d2acd7ce785a81202d4be799 && \
     mim install "mmengine>=0.7.1" "mmcv>=2.0.0rc4"
 
 # Install MMDetection
