@@ -14,7 +14,7 @@ model = dict(
         share_cls_layer=True,
         loss_embed=dict(
             type='EntailmentConeLoss',
-            cone_beta=0.1,
+            beta=0.1,
             init_norm_upper_offset=0.5,
             loss_weight=1.0
             ),

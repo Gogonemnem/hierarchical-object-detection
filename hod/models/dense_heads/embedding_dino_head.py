@@ -60,7 +60,7 @@ class EmbeddingDINOHead(DINOHead):
         self.init_norm_upper_offset = 0.0
         if self.use_cone:
             self.beta = loss_embed['beta']
-            self.init_norm_upper_offset = loss_embed['init_norm_upper_offset']
+            self.init_norm_upper_offset = loss_embed.pop('init_norm_upper_offset', 0.0)
         super().__init__(**kwargs)
 
         if self.use_cone:
