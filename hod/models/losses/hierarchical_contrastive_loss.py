@@ -8,8 +8,8 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
     def __init__(self,
                  aggregate_per='depth',
                  **kwargs):
-        super().__init__(**kwargs)
         self.aggregate_per = aggregate_per
+        super().__init__(**kwargs)
 
     def load_taxonomy(self, ann_file):
         super().load_taxonomy(ann_file)
@@ -46,15 +46,14 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
         sim = torch.exp(distance_matrix)
         neg = (sim.sum(dim=1, keepdim=True) - sim)
 
-        log_probs = torch.log(sim + epsilon) - torch.log(neg + epsilon)
+        log_probs = -(torch.log(sim + epsilon) - torch.log(neg + epsilon))
         log_probs = log_probs.unsqueeze(0) * self.hierarchical_mask # Shape: (C_k, C_i, C_j)
 
         sum_loss_per_anchor_class = log_probs.sum(dim=-1)
+        weighted_sum_loss_per_anchor_class = sum_loss_per_anchor_class * self.class_level_weight.unsqueeze(1)
         count_pairs_per_anchor_class = self.hierarchical_mask.sum(dim=-1)
 
         valid_anchor_mask = count_pairs_per_anchor_class > 0
-        weights = (self.class_level_weight*valid_anchor_mask)[valid_anchor_mask] # Shape: (C_k, 1)
-
-        loss = -weights * sum_loss_per_anchor_class[valid_anchor_mask] / (count_pairs_per_anchor_class[valid_anchor_mask]).type_as(sum_loss_per_anchor_class)
+        loss = weighted_sum_loss_per_anchor_class[valid_anchor_mask] / (count_pairs_per_anchor_class[valid_anchor_mask]).type_as(sum_loss_per_anchor_class)
 
         return loss.mean() * self.loss_weight
