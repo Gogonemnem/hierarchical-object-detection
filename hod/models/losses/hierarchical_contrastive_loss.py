@@ -10,6 +10,7 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
                  **kwargs):
         super().__init__(**kwargs)
         self.aggregate_per = aggregate_per
+
     def load_taxonomy(self, ann_file):
         super().load_taxonomy(ann_file)
         leafs = self.tree.get_leaf_nodes()
