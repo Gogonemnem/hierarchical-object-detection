@@ -10,43 +10,43 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
         leafs = self.tree.get_leaf_nodes()
         leaf_idx = [self.class_to_idx[leaf.name] for leaf in leafs]
         self.leaf_idx = torch.tensor(leaf_idx, device=self.class_level_weight.device)
+        aggregate_per = None
 
-        hierarchical_mask = self.ancestor_path_target_mask[:-1].clone()
+        ancestor_mask = self.ancestor_path_target_mask[:-1].clone()
 
         # set diagonal to 0, distance to itself is not considered
-        hierarchical_mask.fill_diagonal_(0)
-        anchor_indices, pair_indices = hierarchical_mask.nonzero(as_tuple=True)
+        ancestor_mask.fill_diagonal_(0)
 
-        self.anchor_indices = anchor_indices
-        self.pair_indices = pair_indices
+        if aggregate_per is None:
+            self.hierarchical_mask = ancestor_mask.unsqueeze(0) # Shape: (1, C_i, C_j)
+            self.class_level_weight = torch.ones(1, device=self.class_level_weight.device)
 
-        self.weights_for_pairs = self.class_level_weight[self.anchor_indices]
-        self.hierarchical_mask = hierarchical_mask
+        elif aggregate_per == 'node':
+            # expanded_for_i[k,i,0] is ancestor_matrix_C_C[k,i]
+            expanded_for_i = ancestor_mask.T.unsqueeze(2) # Shape: (C_k, C_i, 1)
+                                                            
+            # expanded_for_j[k,0,j] is ancestor_matrix[k,j]
+            expanded_for_j = ancestor_mask.T.unsqueeze(1) # Shape: (C_k, 1, C_j)
+
+            # self.hierarchical_mask[k, i, j] is True if (k is ancestor of i) AND (k is ancestor of j)
+            self.hierarchical_mask = expanded_for_i & expanded_for_j # Shape: (C_k, C_i, C_j)
+        
 
     def forward(self, distance_matrix: torch.Tensor):
         epsilon = 1e-9
         # Supervised contrastive loss
         sim = torch.exp(distance_matrix)
-        pairs = sim[self.anchor_indices, self.pair_indices]
-        sum_sim_from_anchor_to_all = sim.sum(dim=1)
-        denominators_for_pairs = sum_sim_from_anchor_to_all[self.anchor_indices] # Shape: (num_positive_pairs,)
+        neg = (sim.sum(dim=1, keepdim=True) - sim)
 
-        log_probs = torch.log(pairs + epsilon) - torch.log(denominators_for_pairs + epsilon)
-        loss_per_pair = -log_probs # Shape: (num_positive_pairs,)
+        log_probs = torch.log(sim + epsilon) - torch.log(neg + epsilon)
+        log_probs = log_probs.unsqueeze(0) * self.hierarchical_mask # Shape: (C_k, C_i, C_j)
 
-        # loss_per_pair = loss_per_pair * self.weights_for_pairs
-
-        device = loss_per_pair.device
-
-        sum_losses_per_anchor_class = loss_per_pair.sum(dim=-1)
+        sum_loss_per_anchor_class = log_probs.sum(dim=-1)
         count_pairs_per_anchor_class = self.hierarchical_mask.sum(dim=-1)
+
         valid_anchor_mask = count_pairs_per_anchor_class > 0
+        weights = (self.class_level_weight*valid_anchor_mask)[valid_anchor_mask] # Shape: (C_k, 1)
 
-        # If no anchors contributed at all (e.g., if self.anchor_indices was empty, though caught earlier)
-        if not valid_anchor_mask.any():
-            return torch.tensor(0.0, device=device, requires_grad=True) * self.loss_weight
-
-        loss = \
-            sum_losses_per_anchor_class[valid_anchor_mask] / count_pairs_per_anchor_class[valid_anchor_mask].type_as(sum_losses_per_anchor_class)
+        loss = -weights * sum_loss_per_anchor_class[valid_anchor_mask] / (count_pairs_per_anchor_class[valid_anchor_mask]).type_as(sum_loss_per_anchor_class)
 
         return loss.mean() * self.loss_weight
