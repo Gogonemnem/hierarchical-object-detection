@@ -12,8 +12,10 @@ model = dict(
         type='EmbeddingDINOHead',
         cls_curvature=-1.0,
         share_cls_layer=True,
+        freeze_cls_embeddings=False,
         loss_embed=dict(
             type='HierarchicalContrastiveLoss',
+            aggregate_per='depth',
             decay=3,
             loss_weight=1.0,
             ),

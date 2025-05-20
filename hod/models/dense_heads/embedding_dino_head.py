@@ -20,6 +20,7 @@ class EmbeddingDINOHead(DINOHead):
                  ann_file='',
                  cls_curvature=0.0,
                  share_cls_layer=True,
+                 freeze_cls_embeddings: bool=False,
                  loss_embed: OptConfigType=None,
                  **kwargs):
         """
@@ -49,6 +50,7 @@ class EmbeddingDINOHead(DINOHead):
         """
         self.curvature = cls_curvature
         self.share_cls_layer = share_cls_layer
+        self.freeze_cls_embeddings = freeze_cls_embeddings
         use_embed_loss = loss_embed and isinstance(loss_embed, dict)
         self.use_cone = use_embed_loss and loss_embed.get('type', None) == "EntailmentConeLoss" and loss_embed.get('loss_weight', 0.0) > 0
         self.use_contrastive = use_embed_loss and loss_embed.get('type', None) == "HierarchicalContrastiveLoss" and loss_embed.get('loss_weight', 0.0) > 0
@@ -111,7 +113,8 @@ class EmbeddingDINOHead(DINOHead):
                                      use_cone=self.use_cone,
                                      cone_beta=self.beta,
                                      init_norm_upper_offset=self.init_norm_upper_offset,
-                                     clip_exempt_indices=clip_exempt,)
+                                     clip_exempt_indices=clip_exempt,
+                                     freeze_embeddings=self.freeze_cls_embeddings,)
 
         if self.share_cls_layer:
             self.cls_branches = nn.ModuleList(

@@ -21,6 +21,7 @@ class EmbeddingClassifier(nn.Module):
                  cone_beta: float=0.1,
                  init_norm_upper_offset: float=0.5,
                  clip_exempt_indices: List[int] | None = None,
+                 freeze_embeddings: bool=False,
                  device=None,
                  dtype=None,
             ) -> None:
@@ -47,6 +48,9 @@ class EmbeddingClassifier(nn.Module):
         self.embeddings = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
             )
+        # Set requires_grad based on the new parameter
+        if freeze_embeddings:
+            self.embeddings.requires_grad_(False)
         if bias:
             self.geometric_bias = Parameter(torch.empty(1, **factory_kwargs))
         else:
