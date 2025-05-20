@@ -92,12 +92,18 @@ class EmbeddingClassifier(nn.Module):
 
     @property
     def prototypes(self):
-        embeddings = self.embeddings
+        raw_embeddings = self.embeddings
         if self.curvature < 0.0:
-            embeddings = self.expmap0(embeddings, self.curvature)
+            raw_embeddings = self.expmap0(raw_embeddings, c=self.curvature)
+        
+        # Apply norm clipping if cone loss is used (use_cone is set at init)
         if self.use_cone:
-            embeddings = self._apply_min_norm_clipping(embeddings)
-        return embeddings
+            # _apply_min_norm_clipping handles the exempt_mask internally.
+            # It returns a new tensor if clipping occurs, otherwise the original.
+            # This is differentiable.
+            raw_embeddings = self._apply_min_norm_clipping(raw_embeddings)
+            
+        return raw_embeddings
 
     def expmap0(self, x: torch.Tensor, c: float = -1.0, eps: float = 1e-5):
         # x: (..., d) unconstrained in ℝᵈ
