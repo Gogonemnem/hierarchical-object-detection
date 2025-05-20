@@ -5,32 +5,39 @@ from hod.models.losses.hierarchical_focal_loss import HierarchicalFocalLoss
 
 @MODELS.register_module()
 class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
+    def __init__(self,
+                 aggregate_per='depth',
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.aggregate_per = aggregate_per
     def load_taxonomy(self, ann_file):
         super().load_taxonomy(ann_file)
         leafs = self.tree.get_leaf_nodes()
         leaf_idx = [self.class_to_idx[leaf.name] for leaf in leafs]
         self.leaf_idx = torch.tensor(leaf_idx, device=self.class_level_weight.device)
-        aggregate_per = None
 
         ancestor_mask = self.ancestor_path_target_mask[:-1].clone()
 
         # set diagonal to 0, distance to itself is not considered
         ancestor_mask.fill_diagonal_(0)
 
-        if aggregate_per is None:
+        if self.aggregate_per is None:
             self.hierarchical_mask = ancestor_mask.unsqueeze(0) # Shape: (1, C_i, C_j)
             self.class_level_weight = torch.ones(1, device=self.class_level_weight.device)
 
-        elif aggregate_per == 'node':
-            # expanded_for_i[k,i,0] is ancestor_matrix_C_C[k,i]
+        elif self.aggregate_per == 'node' or self.aggregate_per == 'depth':
             expanded_for_i = ancestor_mask.T.unsqueeze(2) # Shape: (C_k, C_i, 1)
-                                                            
-            # expanded_for_j[k,0,j] is ancestor_matrix[k,j]
             expanded_for_j = ancestor_mask.T.unsqueeze(1) # Shape: (C_k, 1, C_j)
-
             # self.hierarchical_mask[k, i, j] is True if (k is ancestor of i) AND (k is ancestor of j)
             self.hierarchical_mask = expanded_for_i & expanded_for_j # Shape: (C_k, C_i, C_j)
-        
+
+        if self.aggregate_per == 'depth':
+            depth_lca = self.hierarchical_mask.sum(dim=0, keepdim=True) # Shape: (1, C_i, C_j)
+            max_depth = depth_lca.max().item()
+            depths = torch.arange(max_depth, device=self.class_level_weight.device)
+
+            self.hierarchical_mask = (depth_lca > depths[:, None, None]) # Shape: (C_k, C_i, C_j)
+            self.class_level_weight = (1 - self.decay) * self.decay ** depths / (1 - self.decay ** max_depth) # Shape: (C_k, 1)
 
     def forward(self, distance_matrix: torch.Tensor):
         epsilon = 1e-9
