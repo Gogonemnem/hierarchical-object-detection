@@ -1,5 +1,5 @@
 _base_ = [
-    'dino-4scale_r50_improved_8xb2_hier-aircraft.py',
+    '../dino-4scale_r50_improved_8xb2_hier-aircraft.py',
 ]
 
 custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
@@ -10,15 +10,8 @@ data_root = 'data/aircraft/hierarchical/'
 model = dict(
     bbox_head=dict(
         type='EmbeddingDINOHead',
-        cls_curvature=-1.0,
+        cls_curvature=0.0,
         share_cls_layer=True,
-        freeze_cls_embeddings=False,
-        loss_embed=dict(
-            type='HierarchicalContrastiveLoss',
-            aggregate_per='depth',
-            decay=3,
-            loss_weight=1.0,
-            ),
         loss_cls=dict(
             type='HierarchicalFocalLoss',
             decay=3,)
