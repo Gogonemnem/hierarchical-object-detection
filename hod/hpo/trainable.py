@@ -3,10 +3,12 @@ from pathlib import Path
 import os
 from typing import Any, Dict, List, Union
 import copy # Add import for deepcopy
+import torch # Add torch import
 
 from mmengine.config import Config, ConfigDict # Ensure ConfigDict is imported
 from mmengine.runner import Runner
-from ray import tune, train
+from ray import train # Changed from 'from ray import tune, train' to just 'from ray import train'
+from ray.air import session # Added import for ray.air.session
 
 def _finalize_config_choices(
     current_trial_config_node: Union[Dict[str, Any], List[Any], Any], 
@@ -254,64 +256,45 @@ def _substitute_shared_params_in_config_obj(config_node: Any, trial_config: Dict
                 _substitute_shared_params_in_config_obj(item, trial_config)
     # Non-container types or non-hpo_ref strings are left as is by this function.
 
-def train_trial(trial_config: dict, cfg_path: str, project_root_dir: str):
-    # ... (initial prints and os.chdir remain the same) ...
-    print(f"DEBUG: train_trial: Initial CWD: {os.getcwd()}")
-    print(f"DEBUG: train_trial: Received cfg_path: {cfg_path}")
-    print(f"DEBUG: train_trial: Received project_root_dir: {project_root_dir}")
+def train_loop_per_worker(current_trial_hyperparameters: dict):
+    """
+    This function is executed by each DDP worker process managed by TorchTrainer.
+    It receives the hyperparameter configuration for the current trial.
+    Static configuration like cfg_path and project_root_dir are expected to be in current_trial_hyperparameters.
+    """
+    # Extract static and dynamic config parts
+    # Static parts (like original cfg_path, project_root_dir) are passed via train_loop_config
+    # and merged into current_trial_hyperparameters by Ray Tune.
+    cfg_path = current_trial_hyperparameters.pop("cfg_path")
+    project_root_dir = current_trial_hyperparameters.pop("project_root_dir")
+    # The remaining items in current_trial_hyperparameters are the actual hyperparameters for this trial.
 
-    print("--- train_trial received config from Ray Tune: ---")
-    pprint.pprint(trial_config)
+    print(f"DEBUG: train_loop_per_worker (Rank {train.get_context().get_world_rank()}): Initial CWD: {os.getcwd()}")
+    print(f"DEBUG: train_loop_per_worker (Rank {train.get_context().get_world_rank()}): Received cfg_path: {cfg_path}")
+    print(f"DEBUG: train_loop_per_worker (Rank {train.get_context().get_world_rank()}): Received project_root_dir: {project_root_dir}")
+
+    print(f"--- train_loop_per_worker (Rank {train.get_context().get_world_rank()}) received hyperparameters: ---")
+    pprint.pprint(current_trial_hyperparameters)
     print(f"--- Base Cfg Path: {cfg_path} ---")
     print(f"--- Project Root: {project_root_dir} ---")
     print("--------------------------------------------------")
 
     os.chdir(project_root_dir)
-    print(f"Changed CWD to: {os.getcwd()}")
+    print(f"Changed CWD to: {os.getcwd()} (Rank {train.get_context().get_world_rank()})")
 
     cfg = Config.fromfile(cfg_path)
     
-    print("--- train_trial: Base cfg BEFORE _finalize_config_choices AND pre-merge deletion ---")
-    # ... (existing inspection of base cfg can remain) ...
-    target_node_path_str = "model.bbox_head.loss_embed" 
-    try:
-        node_to_inspect = cfg['model']['bbox_head']['loss_embed']
-        print(f"--- Inspecting BASE cfg.{target_node_path_str} specifically: ---")
-        pprint.pprint(node_to_inspect) 
-        print(f"Type of BASE cfg.{target_node_path_str}: {type(node_to_inspect)}")
-        is_dict_check = isinstance(node_to_inspect, dict)
-        print(f"BASE cfg.{target_node_path_str} isinstance(node, dict): {is_dict_check}")
-        if is_dict_check:
-            node_type_attr = node_to_inspect.get('type')
-            print(f"BASE cfg.{target_node_path_str}.get('type'): {node_type_attr}")
-        else:
-            if hasattr(node_to_inspect, 'type'):
-                 print(f"BASE cfg.{target_node_path_str} is not a dict, but has 'type' attr: {getattr(node_to_inspect, 'type')}")
-            else:
-                 print(f"BASE cfg.{target_node_path_str} is not a dict and does not have .get('type') or a 'type' attribute.")
-    except KeyError:
-        print(f"BASE cfg.{target_node_path_str} not found via key access in base_cfg.")
-    except Exception as e:
-        print(f"Error inspecting base_cfg.{target_node_path_str}: {type(e).__name__} - {e}")
-    print("-------------------------------------------------------------")
+    choice_paths_resolved_in_cfg: List[List[str]] = []
 
-    choice_paths_resolved_in_cfg: List[List[str]] = [] 
-
+    # current_trial_hyperparameters now only contains the HPO choices
     final_trial_params_for_merge = _finalize_config_choices(
-        copy.deepcopy(trial_config), 
+        copy.deepcopy(current_trial_hyperparameters), 
         cfg,                         
-        [],                          # Initial path_keys is empty
-        choice_paths_resolved_in_cfg # Pass the accumulator
+        [],                          
+        choice_paths_resolved_in_cfg 
     )
     
-    print("--- train_trial: Final trial params for merge (after _finalize_config_choices): ---")
-    pprint.pprint(final_trial_params_for_merge)
-    print("------------------------------------------------------------------------------------")
-
-    print("--- train_trial: Paths of choices resolved in base_cfg (to be deleted before merge): ---")
-    pprint.pprint(choice_paths_resolved_in_cfg)
-    print("---------------------------------------------------------------------------------------")
-
+    # ... (Pre-merge deletion logic for choice stubs - remains the same) ...
     # Before merging, delete the original choice stubs from cfg
     for path_keys_to_delete in choice_paths_resolved_in_cfg:
         if not path_keys_to_delete:
@@ -331,91 +314,98 @@ def train_trial(trial_config: dict, cfg_path: str, project_root_dir: str):
                         break 
                     current_node = current_node[key_segment]
                 else:
-                    print(f"Warning: Path segment '{key_segment}' not found in cfg during pre-merge deletion for path {'.'.join(path_keys_to_delete)}")
+                    print(f"Warning (Rank {train.get_context().get_world_rank()}): Path segment '{key_segment}' not found in cfg during pre-merge deletion for path {'.'.join(path_keys_to_delete)}")
                     parent_node = None # Path broken
                     break
             else:
-                print(f"Warning: Node at '{'.'.join(path_keys_to_delete[:i])}' is not a dict-like object during pre-merge deletion for path {'.'.join(path_keys_to_delete)}")
+                print(f"Warning (Rank {train.get_context().get_world_rank()}): Node at '{'.'.join(path_keys_to_delete[:i])}' is not a dict-like object during pre-merge deletion for path {'.'.join(path_keys_to_delete)}")
                 parent_node = None # Path broken
                 break
         
         if parent_node is not None and key_of_node_to_delete is not None:
             try:
-                print(f"Pre-merge: Deleting cfg node at path: {'.'.join(path_keys_to_delete)}")
+                print(f"Pre-merge (Rank {train.get_context().get_world_rank()}): Deleting cfg node at path: {'.'.join(path_keys_to_delete)}")
                 del parent_node[key_of_node_to_delete]
             except Exception as e:
-                print(f"Error deleting cfg node at path {'.'.join(path_keys_to_delete)}: {e}")
+                print(f"Error deleting cfg node at path {'.'.join(path_keys_to_delete)} (Rank {train.get_context().get_world_rank()}): {e}")
         else:
-            print(f"Warning: Could not delete cfg node at path {'.'.join(path_keys_to_delete)} before merge. Navigation failed or key not found at final step.")
+            print(f"Warning (Rank {train.get_context().get_world_rank()}): Could not delete cfg node at path {'.'.join(path_keys_to_delete)} before merge. Navigation failed or key not found at final step.")
 
     cfg.merge_from_dict(final_trial_params_for_merge)
+    _substitute_shared_params_in_config_obj(cfg, current_trial_hyperparameters) # Pass HPO params for substitution refs
 
-    print("--- train_trial: cfg object AFTER merge, BEFORE shared param substitution ---")
-    # You can add a pprint of cfg here if needed for debugging
-    
-    # Perform shared parameter substitution
-    _substitute_shared_params_in_config_obj(cfg, trial_config)
-    
-    print("--- train_trial: cfg object AFTER shared param substitution, BEFORE Runner.from_cfg ---")
-    # You can add a pprint of cfg here if needed for debugging
+    # Set up work_dir using Ray AIR session
+    trial_output_dir = session.get_trial_dir() # Changed to use session.get_trial_dir()
+    cfg.work_dir = str(trial_output_dir)
+    Path(cfg.work_dir).mkdir(parents=True, exist_ok=True)
+    print(f"DEBUG (Rank {train.get_context().get_world_rank()}): work_dir set to: {cfg.work_dir}")
 
-    print("--- train_trial: Inspecting cfg.model.bbox_head.loss_cls after merge AND substitution ---") 
-    if hasattr(cfg, 'model') and cfg.model is not None and \
-       hasattr(cfg.model, 'bbox_head') and cfg.model.bbox_head is not None and \
-       hasattr(cfg.model.bbox_head, 'loss_cls') and cfg.model.bbox_head.loss_cls is not None:
-        pprint.pprint(cfg.model.bbox_head.loss_cls)
+    # Launcher setup for MMEngine
+    # When using TorchTrainer with num_workers > 1, Ray Train sets up DDP.
+    # MMEngine should use 'pytorch' launcher.
+    # If num_workers == 1 (single GPU trial), 'none' launcher.
+    world_size = train.get_context().get_world_size()
+    if world_size > 1:
+        cfg.launcher = 'pytorch'
+        print(f"DEBUG (Rank {train.get_context().get_world_rank()}): world_size={world_size}. Setting cfg.launcher = 'pytorch'.")
     else:
-        print("cfg.model.bbox_head.loss_cls not found or structure is different.")
-    print("------------------------------------------------------------------------------------")
+        cfg.launcher = 'none'
+        print(f"DEBUG (Rank {train.get_context().get_world_rank()}): world_size={world_size}. Setting cfg.launcher = 'none'.")
 
-    current_trial_dir = train.get_context().get_trial_dir()
-    if not current_trial_dir:
-        print("ERROR: Could not get trial directory from Ray Tune context!")
-        current_trial_dir = Path(project_root_dir) / "work_dirs" / "ray_trials" / f"trial_{train.get_context().get_trial_id()}"
-        print(f"Falling back to trial directory: {current_trial_dir}")
-    
-    trial_dir = Path(current_trial_dir)
-    trial_dir.mkdir(parents=True, exist_ok=True)
-    cfg.work_dir = str(trial_dir)
+    # DDP environment variables are automatically set by Ray Train / TorchTrainer.
+    # No need to print them here unless for deep debugging, MMEngine will pick them up.
+
+    # The user's debug exception can be removed or conditionalized for rank 0 if needed.
+    # if train.get_context().get_world_rank() == 0:
+    #     raise Exception("DEBUG: Stopping execution here to inspect environment variables before Runner.from_cfg.")
 
     runner = Runner.from_cfg(cfg)
     runner.train()
 
-    # Assuming 'coco/bbox_mAP' is the metric. Adjust if it's different (e.g., 'val/mAP')
-    # Check common MMDetection metric names if this is not found.
-    # Common names: 'val/coco/bbox_mAP', 'test/coco/bbox_mAP', or just 'mAP' if configured.
-    # Based on previous logs, 'coco/bbox_mF1' was used, let's stick to that or a more general mAP.
-    # Try to get a common mAP metric first.
-    map_metric_keys = ['val/coco/bbox_mAP', 'coco/bbox_mAP', 'val/mAP', 'mAP']
-    best_map = None
-    for key in map_metric_keys:
-        scalar_values = runner.message_hub.get_scalar(key) # get_scalar returns a MessageHubStore object
-        if scalar_values is not None and scalar_values.data: # Check if data exists
-             # Get the last value if it's a series, or the value itself
-            best_map = scalar_values.current() # .current() gives the latest value
-            if best_map is not None:
-                print(f"Found metric {key} with value: {best_map}")
-                break
+    # Metric reporting - ALL workers must call session.report()
+    # Rank 0 reports the actual metrics for Ray Tune.
+    # Other ranks report a dummy/empty dict to satisfy the trainer.
+    metrics_to_report = {}
+    if train.get_context().get_world_rank() == 0:
+        map_metric_keys = ['val/coco/bbox_mAP', 'coco/bbox_mAP', 'val/mAP', 'mAP']
+        best_map = None
+        for key in map_metric_keys:
+            scalar_values = runner.message_hub.get_scalar(key)
+            if scalar_values is not None and scalar_values.data:
+                best_map = scalar_values.current()
+                if best_map is not None:
+                    print(f"Rank 0: Found metric {key} with value: {best_map}")
+                    break
+        
+        if best_map is None:
+            mf1_values = runner.message_hub.get_scalar("coco/bbox_mF1")
+            if mf1_values is not None and mf1_values.data:
+                best_map = mf1_values.current()
+                print(f"Rank 0: Found metric coco/bbox_mF1 with value: {best_map}")
+
+        if best_map is not None:
+            metrics_to_report = {"mAP": best_map}
+        else:
+            print("Rank 0: Warning: Could not find a suitable mAP or mF1 metric to report to Ray Tune.")
+            metrics_to_report = {"mAP": 0.0}
+        
+        # Save final config only on Rank 0
+        dump_cfg_path = Path(cfg.work_dir) / "final_merged_config.py"
+        with open(dump_cfg_path, "w") as f:
+            f.write(cfg.pretty_text)
+        print(f"Rank 0: Final merged config saved to {dump_cfg_path}")
     
-    if best_map is None: # Fallback to previously used mF1 if mAP not found
-        mf1_values = runner.message_hub.get_scalar("coco/bbox_mF1")
-        if mf1_values is not None and mf1_values.data:
-            best_map = mf1_values.current()
-            print(f"Found metric coco/bbox_mF1 with value: {best_map}")
+    # All workers call session.report()
+    # Rank 0 sends actual metrics, others can send an empty dict or minimal status.
+    # For simplicity, non-rank 0 workers will also report the metrics_to_report dict,
+    # which will be empty for them. Ray Tune primarily uses Rank 0's report for optimization.
+    session.report(metrics_to_report)
 
-    if best_map is not None:
-        train.report({"mAP": best_map}) # Report the found metric as mAP
-    else:
-        print("Warning: Could not find a suitable mAP or mF1 metric to report to Ray Tune.")
-        train.report({"mAP": 0.0}) # Report a default value if nothing found
+# The old train_trial function is no longer directly used by Ray Tune with TorchTrainer.
+# It can be removed or kept for other purposes if needed, but for this HPO setup,
+# train_loop_per_worker is the key function.
+# For clarity, I will comment out the old train_trial function.
 
-    dump_cfg_path = trial_dir / "final_merged_config.py"
-    print(f"DEBUG: trainable.py: Final merged config object before pretty_text: {type(cfg)}")
-    # print(f"DEBUG: trainable.py: cfg.pretty_text type: {type(cfg.pretty_text)}") # This would execute pretty_text
-    # print(f"DEBUG: trainable.py: cfg.filename value: {cfg.filename}")
-    # print(f"DEBUG: trainable.py: cfg.text type: {type(cfg.text)}")
-
-    with open(dump_cfg_path, "w") as f:
-        f.write(cfg.pretty_text) # Changed from cfg.pretty_text()
-
-    # Clean up the temporary config file if it was created
+# def train_trial(trial_config: dict, cfg_path: str, project_root_dir: str):
+#     # ... (old implementation)
+#     pass
