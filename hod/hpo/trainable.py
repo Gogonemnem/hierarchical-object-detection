@@ -352,13 +352,6 @@ def train_loop_per_worker(current_trial_hyperparameters: dict):
         cfg.launcher = 'none'
         print(f"DEBUG (Rank {train.get_context().get_world_rank()}): world_size={world_size}. Setting cfg.launcher = 'none'.")
 
-    # DDP environment variables are automatically set by Ray Train / TorchTrainer.
-    # No need to print them here unless for deep debugging, MMEngine will pick them up.
-
-    # The user's debug exception can be removed or conditionalized for rank 0 if needed.
-    # if train.get_context().get_world_rank() == 0:
-    #     raise Exception("DEBUG: Stopping execution here to inspect environment variables before Runner.from_cfg.")
-
     runner = Runner.from_cfg(cfg)
     runner.train()
 
@@ -367,27 +360,29 @@ def train_loop_per_worker(current_trial_hyperparameters: dict):
     # Other ranks report a dummy/empty dict to satisfy the trainer.
     metrics_to_report = {}
     if train.get_context().get_world_rank() == 0:
-        map_metric_keys = ['val/coco/bbox_mAP', 'coco/bbox_mAP', 'val/mAP', 'mAP']
-        best_map = None
-        for key in map_metric_keys:
-            scalar_values = runner.message_hub.get_scalar(key)
-            if scalar_values is not None and scalar_values.data:
-                best_map = scalar_values.current()
-                if best_map is not None:
-                    print(f"Rank 0: Found metric {key} with value: {best_map}")
-                    break
+        # Get all scalar metrics from the message hub
+        # log_scalars is a dict like {metric_name: ScalarLogData}
+        all_scalar_logs = runner.message_hub.log_scalars 
         
-        if best_map is None:
-            mf1_values = runner.message_hub.get_scalar("coco/bbox_mF1")
-            if mf1_values is not None and mf1_values.data:
-                best_map = mf1_values.current()
-                print(f"Rank 0: Found metric coco/bbox_mF1 with value: {best_map}")
-
-        if best_map is not None:
-            metrics_to_report = {"mAP": best_map}
+        current_scalar_values = {}
+        for key, scalar_log_data in all_scalar_logs.items():
+            # The ScalarLogData object itself can give the current value
+            # No need to call get_scalar(key) again if we iterate log_scalars
+            if scalar_log_data is not None and scalar_log_data.data: # Check if data (history) exists
+                current_value = scalar_log_data.current() # Get the latest value
+                if current_value is not None:
+                    # Ensure the value is a simple float for Ray Tune
+                    # MMEngine keys are usually like 'val/coco/bbox_mAP', which is fine.
+                    current_scalar_values[key] = float(current_value) 
+        
+        if current_scalar_values:
+            metrics_to_report = current_scalar_values
+            print(f"Rank 0: Reporting metrics to Ray Tune: {metrics_to_report}")
         else:
-            print("Rank 0: Warning: Could not find a suitable mAP or mF1 metric to report to Ray Tune.")
-            metrics_to_report = {"mAP": 0.0}
+            print("Rank 0: Warning: No scalar metrics found in runner.message_hub.log_scalars. Reporting empty metrics.")
+            # It's crucial that the metric named in hpo_config.py is actually logged by MMEngine.
+            # If the primary metric isn't found among the reported ones, Ray Tune will likely error out.
+            metrics_to_report = {} 
         
         # Save final config only on Rank 0
         dump_cfg_path = Path(cfg.work_dir) / "final_merged_config.py"
