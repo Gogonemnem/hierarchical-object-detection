@@ -9,6 +9,11 @@ from mmengine.runner import Runner
 
 from mmdet.utils import setup_cache_size_limit_of_dynamo
 
+# Import the pre-training function
+# Assuming it will be moved to hod.training.prototypes
+# If it stays in tools.pretrain_prototypes, the import path will need adjustment
+from hod.training.prototypes import perform_prototype_pretraining
+from pathlib import Path # Add Path import
 
 # Patch torch.load to disable `weights_only=True` introduced in PyTorch 2.6
 # This avoids UnpicklingError when resuming from checkpoints saved with full objects.
@@ -90,6 +95,58 @@ def main():
         # use config filename as default work_dir if cfg.work_dir is None
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
+
+    # --- Prototype Pre-training Integration ---
+    pretrain_cfg = cfg.get('prototype_pretrain_cfg')
+
+    if pretrain_cfg and pretrain_cfg.get('enable', False):
+        print("Prototype pre-training enabled via configuration.")
+        
+        # Get pre-training parameters from config, with defaults
+        epochs = pretrain_cfg.get('epochs', 100)
+        device_override = pretrain_cfg.get('device') # Can be None
+        force_pretrain = pretrain_cfg.get('force_pretrain', False)
+        # output_dir_name = pretrain_cfg.get('output_subdir', 'prototype_pretrain') # More configurable output
+        # output_filename = pretrain_cfg.get('output_filename', 'pretrained_prototypes.pth')
+
+        pretrain_output_dir = Path(cfg.work_dir) / 'prototype_pretrain' # Keeping it simple for now
+        pretrain_output_file = pretrain_output_dir / 'pretrained_prototypes.pth'
+        pretrain_output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not force_pretrain and pretrain_output_file.exists():
+            print(f"Found existing pre-trained prototype checkpoint: {pretrain_output_file}")
+            print("Skipping pre-training. Set prototype_pretrain_cfg.force_pretrain=True in config to override.")
+            cfg.load_from = str(pretrain_output_file)
+            cfg.resume = False # Ensure we are not resuming if we load this pre-trained model
+        else:
+            if force_pretrain and pretrain_output_file.exists():
+                print(f"force_pretrain=True. Re-running prototype pre-training and overwriting {pretrain_output_file}")
+            elif not pretrain_output_file.exists():
+                print(f"No existing pre-trained checkpoint found at {pretrain_output_file}. Starting pre-training.")
+            
+            pretrain_device = device_override
+            if pretrain_device is None:
+                pretrain_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            print(f"Starting prototype pre-training for {epochs} epochs on device '{pretrain_device}'.")
+            print(f"Pre-trained checkpoint will be saved to: {pretrain_output_file}")
+
+            try:
+                saved_checkpoint_path = perform_prototype_pretraining(
+                    model_config_path=args.config, # Main config path
+                    output_checkpoint_file=pretrain_output_file,
+                    epochs=epochs,
+                    device=pretrain_device
+                )
+                print(f"Prototype pre-training complete. Checkpoint saved to: {saved_checkpoint_path}")
+                cfg.load_from = str(saved_checkpoint_path)
+                cfg.resume = False
+            except Exception as e:
+                print(f"Error during prototype pre-training: {e}")
+                raise RuntimeError(f"Prototype pre-training failed: {e}")
+        
+        print(f"Set 'cfg.load_from' to '{cfg.load_from}' for main training.")
+    # --- End of Prototype Pre-training Integration ---
 
     # enable automatic-mixed-precision training
     if args.amp is True:
