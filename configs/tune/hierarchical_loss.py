@@ -43,6 +43,7 @@ model = dict(
             # _delete_=True,
             type='Choice',
             options=[
+                None,
                 dict(
                     type='EntailmentConeLoss',
                     beta=dict(type='LogUniform', lower=0.01, upper=1.0),
@@ -51,7 +52,7 @@ model = dict(
                 ),
                 dict(
                     type='HierarchicalContrastiveLoss',
-                    aggregate_per='node',
+                    aggregate_per=dict(type='Choice', options=['node', 'depth', None]),
                     decay="hpo_ref:shared_decay",
                     loss_weight="hpo_ref:shared_embed_loss_weight"
                 ),
