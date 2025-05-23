@@ -4,8 +4,9 @@ a flat dictionary of Ray Tune samplers, which is then unflattened to a
 nested param_space. Complex choices are flattened for compatibility.
 """
 from __future__ import annotations
-from typing import Any, Mapping, Sequence, Dict, List
+from typing import Any, Mapping, Sequence, Dict, List, Union
 from ray import tune
+from mmengine.config import Config
 
 # Factory for creating Ray Tune samplers from stubs
 _SAMPLER_FACTORY: Dict[str, Any] = {
@@ -13,13 +14,35 @@ _SAMPLER_FACTORY: Dict[str, Any] = {
     "RandFloat":  lambda s: tune.uniform(s["lower"], s["upper"]),
     "Uniform":    lambda s: tune.uniform(s["lower"], s["upper"]),
     "LogUniform": lambda s: tune.loguniform(s["lower"], s["upper"]),
-    # "Choice" is handled specially in _recursive_build_flat_search_space
+    # "Choice" is handled specially
 }
 
 def _is_sampler_stub(node: Any) -> bool:
     """Checks if a node is a dictionary representing a sampler stub."""
     return isinstance(node, Mapping) and "type" in node and \
            (node["type"] in _SAMPLER_FACTORY or node["type"] == "Choice")
+
+def _resolve_node_to_sampler_or_structure(node_config: Any) -> Any:
+    """
+    Recursively resolves a configuration node into its final form for a tune.choice list.
+    Sampler stubs are converted to Ray Tune sampler objects.
+    Dicts/lists are traversed, and their contents are recursively resolved.
+    Literals are returned as is.
+    """
+    if _is_sampler_stub(node_config):
+        sampler_type = node_config["type"]
+        if sampler_type == "Choice":
+            # Recursively resolve options for this inner choice
+            inner_options = [_resolve_node_to_sampler_or_structure(opt) for opt in node_config.get("options", [])]
+            return tune.choice(inner_options)
+        else: # RandInt, Uniform, etc.
+            return _SAMPLER_FACTORY[sampler_type](node_config)
+    elif isinstance(node_config, Mapping):
+        return {k: _resolve_node_to_sampler_or_structure(v) for k, v in node_config.items()}
+    elif isinstance(node_config, Sequence) and not isinstance(node_config, (str, bytes)):
+        return [_resolve_node_to_sampler_or_structure(item) for item in node_config]
+    else: # Literal
+        return node_config
 
 def _recursive_build_flat_search_space(
     config_node: Any,
@@ -40,91 +63,56 @@ def _recursive_build_flat_search_space(
         if sampler_type == "Choice":
             options = config_node.get("options", [])
             
-            # Determine if it's a complex choice (options are component stubs)
-            # vs. a simple choice (options are literals or direct samplers).
-            is_complex_choice_scenario = False
-            if options and isinstance(options[0], Mapping) and "type" in options[0]:
-                # If the first option is a dict with a 'type' key, assume it's a complex choice
-                # where options are component definitions.
-                is_complex_choice_scenario = True
-                # Further validation: ensure all options in a complex choice are dicts with 'type'
-                if not all(isinstance(opt, Mapping) and "type" in opt for opt in options):
-                    # This logic could be enhanced to support mixed simple/complex options if needed,
-                    # but that would complicate the flattening and reconstruction significantly.
-                    # For now, assume options in a "complex" choice are consistently component stubs.
-                    # If not, it might fall into the simple choice path, or error.
-                    # Consider raising an error for mixed option types in a complex choice.
-                    pass # Potentially problematic if options are mixed.
+            # Determine if this is a choice between user-defined components (complex)
+            # or a choice between literals/direct-samplers/nested-structures (simple).
+            is_choice_of_components = False
+            if options:
+                def is_potential_component_dict(opt_node: Any) -> bool:
+                    # A component dict has a 'type' key that isn't a known sampler type.
+                    return isinstance(opt_node, Mapping) and "type" in opt_node and \
+                           opt_node["type"] not in _SAMPLER_FACTORY and opt_node["type"] != "Choice"
 
-            if is_complex_choice_scenario:
+                if any(is_potential_component_dict(opt) for opt in options):
+                    if all(is_potential_component_dict(opt) for opt in options):
+                        is_choice_of_components = True
+                    else:
+                        # Mixed options (e.g., component dict and a literal/sampler).
+                        # Treat as a simple choice; _resolve_node_to_sampler_or_structure will handle recursion.
+                        print(f"Warning: Choice at '{current_key_str}' has mixed component dicts and other option types. Treating as a simple choice.")
+                        is_choice_of_components = False
+            
+            if is_choice_of_components:
+                # Complex Choice: This choice selects between different component configurations.
+                # Flatten parameters of each component into the main flat_search_space.
+                # Example: param_space will have 'my_choice._CHOICE_TYPE_' and 'my_choice.ComponentA.param1', 'my_choice.ComponentB.paramX'.
                 choice_selector_key = current_key_str + "._CHOICE_TYPE_"
                 option_type_identifiers = []
 
-                for opt_component_stub in options:
-                    # opt_component_stub is like {'type': 'MyLoss', 'param1': {...}, ...}
+                for opt_component_stub in options: # Known to be component dicts here
                     component_type_name = opt_component_stub["type"]
                     option_type_identifiers.append(component_type_name)
 
-                    # Recursively define parameters for this specific component type,
+                    # Recursively define/flatten parameters for this specific component type,
                     # namespacing them under the component_type_name.
                     for param_key, param_value_stub in opt_component_stub.items():
                         if param_key == "type":  # Already used as the identifier
                             continue
                         
                         param_path_parts = current_path_parts + [component_type_name, param_key]
-                        if _is_sampler_stub(param_value_stub): # If it's a sampler, recurse
-                            _recursive_build_flat_search_space(param_value_stub, param_path_parts, flat_search_space)
-                        # elif not isinstance(param_value_stub, (Mapping, Sequence)) or isinstance(param_value_stub, (str, bytes)):
-                        # The original condition for literals was too broad and might misclassify simple lists/dicts of literals.
-                        # We want to capture any non-sampler, non-dict/list that needs further recursion.
-                        # This includes strings, numbers, booleans, and None.
-                        elif not _is_sampler_stub(param_value_stub) and not (isinstance(param_value_stub, Mapping) or (isinstance(param_value_stub, Sequence) and not isinstance(param_value_stub, (str, bytes)))):
-                            # If it's a literal (not a sampler stub, not a dict, not a list/tuple needing recursion),
-                            # add it directly to the flat_search_space for this component option.
-                            # Ray Tune will pass these literals through in the trial_config.
-                            flat_search_space[".".join(param_path_parts)] = param_value_stub
-                        else:
-                            # It's a non-sampler dict/list that might contain more stubs or literals, recurse.
-                            _recursive_build_flat_search_space(param_value_stub, param_path_parts, flat_search_space)
+                        # Delegate to the main recursive function to handle this parameter value.
+                        # This will add samplers or literals at '...component_type_name.param_key'.
+                        _recursive_build_flat_search_space(param_value_stub, param_path_parts, flat_search_space)
                 
-                if option_type_identifiers: # Ensure there were valid options
-                    flat_search_space[choice_selector_key] = tune.choice(list(set(option_type_identifiers))) # Use set to ensure unique type names
-                elif options: # Options existed but none were valid component stubs for flattening
-                    # Fallback to simple choice if complex parsing failed but options are present
-                    # This indicates a misconfiguration or a type of choice not handled by complex flattening.
-                    processed_simple_options = []
-                    for opt_stub in options: # Process as potentially simple options
-                        if _is_sampler_stub(opt_stub):
-                            temp_flat_space = {} # Convert option stub in isolation
-                            _recursive_build_flat_search_space(opt_stub, ["_temp_"], temp_flat_space)
-                            if "_temp_" in temp_flat_space:
-                                processed_simple_options.append(temp_flat_space["_temp_"])
-                            else: # Should not happen if _is_sampler_stub is true
-                                processed_simple_options.append(opt_stub) 
-                        else: # Literal option
-                            processed_simple_options.append(opt_stub)
-                    if processed_simple_options:
-                         flat_search_space[current_key_str] = tune.choice(processed_simple_options)
-                    # If no options at all, this Choice stub is empty and will be ignored.
+                if option_type_identifiers: 
+                    flat_search_space[choice_selector_key] = tune.choice(list(set(option_type_identifiers)))
+                # If options was empty, option_type_identifiers will be empty, nothing added. Correct.
 
-            else: # Simple Choice (options are literals or direct sampler stubs)
-                processed_options = []
-                for opt_stub in options:
-                    if _is_sampler_stub(opt_stub): 
-                        # This handles a choice of other samplers, e.g., tune.choice([uniform_stub, randint_stub])
-                        # Each stub needs to be converted to its Ray Tune sampler object.
-                        # We create a temporary flat space to convert the single option stub.
-                        temp_flat_param_space_for_option = {}
-                        # Use a placeholder key; its structure will be the sampler object.
-                        _recursive_build_flat_search_space(opt_stub, ["_temp_option_"], temp_flat_param_space_for_option)
-                        if "_temp_option_" in temp_flat_param_space_for_option:
-                             processed_options.append(temp_flat_param_space_for_option["_temp_option_"])
-                        else: # Fallback if conversion didn't yield the expected key
-                            processed_options.append(opt_stub)
-                    else: # Literal option
-                        processed_options.append(opt_stub)
-                if processed_options or not options: # Add choice if options processed or if it's an empty choice list
-                    flat_search_space[current_key_str] = tune.choice(processed_options)
+            else: # Simple Choice: tune.choice([resolved_option1, resolved_option2, ...])
+                  # Options can be literals, sampler stubs, or nested dicts/lists containing them.
+                  # Each option needs to be fully resolved (samplers instantiated).
+                resolved_options = [_resolve_node_to_sampler_or_structure(opt) for opt in options]
+                if resolved_options or not options: # tune.choice([]) is valid if options list was empty
+                    flat_search_space[current_key_str] = tune.choice(resolved_options)
         
         else: # RandInt, Uniform, LogUniform, etc. (already handled by _SAMPLER_FACTORY)
             flat_search_space[current_key_str] = _SAMPLER_FACTORY[sampler_type](config_node)
@@ -146,7 +134,7 @@ def _recursive_build_flat_search_space(
     # These are not part of the search space themselves, so they are ignored here.
     # They will be part of the base config loaded in train_trial.
 
-def config_to_param_space(cfg_or_dict: Mapping) -> Dict[str, Any]:
+def config_to_param_space(cfg_or_dict: Union[Config, Mapping]) -> Dict[str, Any]: # Adjusted type hint
     """
     Converts an MMEngine Config object or a dictionary containing hyperparameter
     stubs into a nested dictionary suitable for Ray Tune's `param_space`.
@@ -156,7 +144,7 @@ def config_to_param_space(cfg_or_dict: Mapping) -> Dict[str, Any]:
     to be more compatible with search algorithms like Optuna.
     """
     # Ensure input is a dictionary
-    if hasattr(cfg_or_dict, 'to_dict') and callable(getattr(cfg_or_dict, 'to_dict')): # MMEngine Config object
+    if isinstance(cfg_or_dict, Config): # More specific type check for MMEngine Config
         config_dict = cfg_or_dict.to_dict()
     elif isinstance(cfg_or_dict, dict):
         config_dict = cfg_or_dict.copy() # Use a copy to avoid modifying the original
@@ -244,35 +232,31 @@ if __name__ == '__main__':
     param_space = config_to_param_space(example_config_stub)
     print("Generated param_space (flattening strategy):")
     pprint.pprint(param_space)
-    # Expected output for loss_embed part (among others):
-    # 'loss_embed': {
-    #     '_CHOICE_TYPE_': <ray.tune.sample.Categorical object at ...>,
-    #     'HierarchicalContrastiveLoss': {
-    #         'loss_weight': <ray.tune.sample.LogUniform object at ...>,
-    #         'temperature': <ray.tune.sample.Float object at ...>
-    #     },
-    #     'EntailmentConeLoss': {
-    #         'beta': <ray.tune.sample.Float object at ...>
+    # Expected param_space structure for the 'loss_embed' part (after unflattening):
+    # 'model': {
+    #   'bbox_head': {
+    #     'loss_embed': {
+    #         '_CHOICE_TYPE_': <ray.tune.sample.Categorical object for ['HierarchicalContrastiveLoss', 'EntailmentConeLoss']>,
+    #         'HierarchicalContrastiveLoss': { # Parameters for this choice
+    #             'loss_weight': <ray.tune.sample.LogUniform object ...>,
+    #             'ann_file': 'path/to/ann1.json', # Literal carried through
+    #             'temperature': <ray.tune.sample.Float object ...>
+    #         },
+    #         'EntailmentConeLoss': { # Parameters for this choice
+    #             'beta': <ray.tune.sample.Float object ...>,
+    #             'loss_weight': 1.0 # Literal carried through
+    #         }
     #     }
+    #   }
     # }
-    # Literals like 'ann_file' and 'loss_weight: 1.0' are NOT part of the search space here;
-    # they are part of the base config and remain fixed for the chosen component.
-    # _finalize_config_choices in trainable.py will merge these fixed values from the
-    # original config with the sampled HPs.
-    # Actually, no, the literals from the chosen option *should* be part of the trial_config
-    # if _finalize_config_choices is to work correctly.
-    # The current _recursive_build_flat_search_space IGNORES literals.
-    # This means _finalize_config_choices will only get the *tunable* params.
-    # This needs to be fixed: literals within a chosen component stub should also be carried through.
     #
-    # Correction: The current _recursive_build_flat_search_space only adds sampler stubs to
-    # flat_search_space. Literals are skipped. This means the `trial_config` that
-    # `_finalize_config_choices` gets will *only* contain the tunable parameters for the
-    # chosen component type (e.g., {'_CHOICE_TYPE_': 'TypeA', 'TypeA': {'param1': 0.5}}).
-    # The `_finalize_config_choices` then reconstructs {'type': 'TypeA', 'param1': 0.5}.
-    # The *non-tuned* parameters of TypeA (like 'ann_file' if it was literal in the stub)
-    # must come from the *original base config* that `cfg.merge_from_dict(final_trial_params_for_merge)`
-    # acts upon.
-    # So, the base config (e.g., hierarchical_loss.py) must fully define all options of a choice.
-    # The param_space only defines what's tunable within those options.
-    # This seems to be the standard MMEngine way: base config is complete, HPO overrides parts.
+    # Explanation:
+    # Literals (e.g., 'ann_file', 'loss_weight: 1.0') from within a chosen component's definition
+    # in the HPO config are included in the `param_space` as fixed values (not samplers).
+    # Ray Tune then includes these literals in the `trial_config` that is passed to
+    # `train_loop_per_worker` (as `current_trial_hyperparameters`).
+    # The `_finalize_config_choices` function in `hod.hpo.trainable` uses these literals
+    # when reconstructing the configuration for the chosen component. It merges these
+    # HPO-defined parameters (both sampled and literal) with the original base model config.
+    # This ensures that non-tuned parameters of a chosen component are correctly set according
+    # to the HPO configuration stub for that component.
