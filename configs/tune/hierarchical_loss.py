@@ -47,7 +47,7 @@ model = dict(
             _delete_=True,
             type='Choice',
             options=[
-                # None,
+                None,
                 dict(
                     type='EntailmentConeLoss',
                     beta=dict(type='LogUniform', lower=0.01, upper=1.0),

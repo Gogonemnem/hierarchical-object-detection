@@ -59,6 +59,11 @@ def _finalize_config_choices(
             choice_paths_accumulator.append(list(current_path_keys))
 
         chosen_type_name = current_trial_config_node['_CHOICE_TYPE_']
+        
+        # If the chosen type itself is Python None, then this node should resolve to actual Python None.
+        if chosen_type_name is None:
+            return None
+
         params_for_chosen_type = current_trial_config_node.get(chosen_type_name, {})
         
         final_resolved_node = {'type': chosen_type_name}

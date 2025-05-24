@@ -62,59 +62,67 @@ def _recursive_build_flat_search_space(
 
         if sampler_type == "Choice":
             options = config_node.get("options", [])
-            
-            # Determine if this is a choice between user-defined components (complex)
-            # or a choice between literals/direct-samplers/nested-structures (simple).
-            is_choice_of_components = False
-            if options:
-                def is_potential_component_dict(opt_node: Any) -> bool:
-                    # A component dict has a 'type' key that isn't a known sampler type.
-                    return isinstance(opt_node, Mapping) and "type" in opt_node and \
-                           opt_node["type"] not in _SAMPLER_FACTORY and opt_node["type"] != "Choice"
+            current_key_str = ".".join(current_path_parts) # Moved here, used by both branches
 
-                if any(is_potential_component_dict(opt) for opt in options):
-                    if all(is_potential_component_dict(opt) for opt in options):
-                        is_choice_of_components = True
+            is_choice_of_components = False
+            component_stubs_in_options = [] 
+            has_none_option_in_choice = False
+            
+            if options:
+                has_other_simple_options = False # Tracks if non-component/non-None options exist
+
+                for opt_idx, opt_val in enumerate(options):
+                    if opt_val is None:
+                        has_none_option_in_choice = True
+                    elif isinstance(opt_val, Mapping) and "type" in opt_val and \
+                         opt_val["type"] not in _SAMPLER_FACTORY and opt_val["type"] != "Choice":
+                        if isinstance(opt_val["type"], str):
+                            component_stubs_in_options.append(opt_val)
+                        else:
+                            print(f"Warning: Component option at '{current_key_str}[{opt_idx}]' has a non-string type: {opt_val['type']}. This option will be treated as a simple/literal type.")
+                            has_other_simple_options = True
                     else:
-                        # Mixed options (e.g., component dict and a literal/sampler).
-                        # Treat as a simple choice; _resolve_node_to_sampler_or_structure will handle recursion.
-                        print(f"Warning: Choice at '{current_key_str}' has mixed component dicts and other option types. Treating as a simple choice.")
-                        is_choice_of_components = False
+                        has_other_simple_options = True
+                
+                if component_stubs_in_options and not has_other_simple_options:
+                    is_choice_of_components = True
             
             if is_choice_of_components:
-                # Complex Choice: This choice selects between different component configurations.
-                # Flatten parameters of each component into the main flat_search_space.
-                # Example: param_space will have 'my_choice._CHOICE_TYPE_' and 'my_choice.ComponentA.param1', 'my_choice.ComponentB.paramX'.
                 choice_selector_key = current_key_str + "._CHOICE_TYPE_"
-                option_type_identifiers = []
-
-                for opt_component_stub in options: # Known to be component dicts here
-                    component_type_name = opt_component_stub["type"]
-                    option_type_identifiers.append(component_type_name)
-
-                    # Recursively define/flatten parameters for this specific component type,
-                    # namespacing them under the component_type_name.
-                    for param_key, param_value_stub in opt_component_stub.items():
-                        if param_key == "type":  # Already used as the identifier
-                            continue
-                        
-                        param_path_parts = current_path_parts + [component_type_name, param_key]
-                        # Delegate to the main recursive function to handle this parameter value.
-                        # This will add samplers or literals at '...component_type_name.param_key'.
-                        _recursive_build_flat_search_space(param_value_stub, param_path_parts, flat_search_space)
                 
-                if option_type_identifiers: 
-                    flat_search_space[choice_selector_key] = tune.choice(list(set(option_type_identifiers)))
-                # If options was empty, option_type_identifiers will be empty, nothing added. Correct.
+                type_identifiers_for_choice_sampler = [cs["type"] for cs in component_stubs_in_options]
+                if has_none_option_in_choice:
+                    type_identifiers_for_choice_sampler.append(None) # Add actual None
 
-            else: # Simple Choice: tune.choice([resolved_option1, resolved_option2, ...])
-                  # Options can be literals, sampler stubs, or nested dicts/lists containing them.
-                  # Each option needs to be fully resolved (samplers instantiated).
+                if not type_identifiers_for_choice_sampler:
+                     # This should ideally not be reached if is_choice_of_components is True.
+                     # Fallback to simple choice if, for some reason, no identifiers were collected.
+                    print(f"Internal Warning: Component choice at '{current_key_str}' resulted in no type identifiers. Treating as simple choice.")
+                    resolved_options = [_resolve_node_to_sampler_or_structure(opt) for opt in options]
+                    if resolved_options or not options: 
+                        flat_search_space[current_key_str] = tune.choice(resolved_options)
+                else:
+                    flat_search_space[choice_selector_key] = tune.choice(list(set(type_identifiers_for_choice_sampler)))
+
+                    for comp_stub_dict in component_stubs_in_options: # Only iterate actual component dicts
+                        component_type_name = comp_stub_dict["type"] 
+
+                        for param_key, param_value_stub in comp_stub_dict.items():
+                            if param_key == "type":
+                                continue
+                            param_path_parts = current_path_parts + [component_type_name, param_key]
+                            _recursive_build_flat_search_space(
+                                param_value_stub,
+                                param_path_parts,
+                                flat_search_space
+                            )
+            else: # Simple Choice (or mixed choice treated as simple)
                 resolved_options = [_resolve_node_to_sampler_or_structure(opt) for opt in options]
-                if resolved_options or not options: # tune.choice([]) is valid if options list was empty
+                if resolved_options or not options: 
                     flat_search_space[current_key_str] = tune.choice(resolved_options)
         
-        else: # RandInt, Uniform, LogUniform, etc. (already handled by _SAMPLER_FACTORY)
+        else: # RandInt, Uniform, LogUniform, etc.
+            current_key_str = ".".join(current_path_parts) # Moved here
             flat_search_space[current_key_str] = _SAMPLER_FACTORY[sampler_type](config_node)
 
     elif isinstance(config_node, Mapping):
