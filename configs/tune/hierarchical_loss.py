@@ -39,11 +39,15 @@ model = dict(
         share_cls_layer=dict(
             _delete_=True,
             type='Choice', options=[True, False]),
+        # freeze_cls_embeddings=dict(
+        #     _delete_=True,
+        #     type='Choice', options=[True, False]),
+        freeze_cls_embeddings=False,
         loss_embed=dict(
-            # _delete_=True,
+            _delete_=True,
             type='Choice',
             options=[
-                None,
+                # None,
                 dict(
                     type='EntailmentConeLoss',
                     beta=dict(type='LogUniform', lower=0.01, upper=1.0),
@@ -85,8 +89,18 @@ train_dataloader = dict(
     batch_size=1,
 )
 val_dataloader = dict(
-    batch_size=5,
+    batch_size=1,
 )
 test_dataloader = dict(
     batch_size=1,
+)
+
+# Prototype Pre-training Configuration
+prototype_pretrain_cfg = dict(
+    enable=True,  # Set to True to enable prototype pre-training
+    # enable=dict(
+    #     _delete_=True,
+    #     type='Choice', options=[True, False]),  # Set to False to disable pre-training
+    epochs=100,       # Number of epochs for pre-training
+    force_pretrain=False  # Set to True to always re-run pre-training even if a checkpoint exists
 )
