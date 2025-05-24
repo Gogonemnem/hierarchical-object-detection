@@ -86,3 +86,10 @@ test_evaluator = dict(
     ann_file=data_root + 'aircraft_test.json',
     format_only=False,
     )
+
+# Prototype Pre-training Configuration
+prototype_pretrain_cfg = dict(
+    enable=True,  # Set to False to disable pre-training
+    epochs=100,       # Number of epochs for pre-training
+    force_pretrain=False  # Set to True to always re-run pre-training even if a checkpoint exists
+)
