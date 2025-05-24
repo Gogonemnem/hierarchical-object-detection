@@ -38,7 +38,10 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
             depths = torch.arange(max_depth, device=self.class_level_weight.device)
 
             self.hierarchical_mask = (depth_lca > depths[:, None, None]) # Shape: (C_k, C_i, C_j)
-            self.class_level_weight = (1 - self.decay) * self.decay ** depths / (1 - self.decay ** max_depth) # Shape: (C_k, 1)
+            if self.decay == 1:
+                self.class_level_weight = torch.ones_like(depths, device=self.class_level_weight.device) * 1 / max_depth # Shape: (C_k, 1)
+            else:
+                self.class_level_weight = (1 - self.decay) * self.decay ** depths / (1 - self.decay ** max_depth) # Shape: (C_k, 1)
 
     def forward(self, distance_matrix: torch.Tensor):
         epsilon = 1e-9

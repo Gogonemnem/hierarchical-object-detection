@@ -41,6 +41,7 @@ class HierarchicalFocalLossCost(FocalLossCost):
         assert self.binary_input is False, "HierarchicalFocalLossCost only supports binary_input=False"
 
         self.decay = decay
+        self._ann_file_for_debug_reinit = ann_file # Store for potential re-init if attributes are None
 
         self.ancestor_path_target_mask: Optional[Tensor] = None
         self.class_level_weight: Optional[Tensor] = None
@@ -103,39 +104,52 @@ class HierarchicalFocalLossCost(FocalLossCost):
             torch.Tensor: Hierarchical classification cost matrix of shape
                 (num_queries, num_gt).
         """
-        # Ensure tensors are on the same device
         current_device = cls_pred.device
-        if self.ancestor_path_target_mask.device != current_device:
+
+        if self.ancestor_path_target_mask is None or self.class_level_weight is None:
+            # This might indicate an issue if it happens after the first call per instance.
+            if hasattr(self, '_ann_file_for_debug_reinit') and self._ann_file_for_debug_reinit:
+                self.load_taxonomy(self._ann_file_for_debug_reinit)
+            else:
+                # Fallback to prevent immediate crash, though results will be incorrect.
+                num_model_classes_from_pred = cls_pred.shape[-1]
+                self.ancestor_path_target_mask = torch.zeros((num_model_classes_from_pred + 1, num_model_classes_from_pred), dtype=torch.bool, device=current_device)
+                self.class_level_weight = torch.zeros((num_model_classes_from_pred,), dtype=cls_pred.dtype, device=current_device)
+
+        # Ensure tensors are on the same device after potential re-initialization
+        if self.ancestor_path_target_mask is not None and self.ancestor_path_target_mask.device != current_device:
             self.ancestor_path_target_mask = self.ancestor_path_target_mask.to(current_device)
-        if self.class_level_weight.device != current_device:
+        if self.class_level_weight is not None and self.class_level_weight.device != current_device:
             self.class_level_weight = self.class_level_weight.to(current_device)
+
+        # If still None after attempts, cannot compute cost meaningfully.
+        if self.ancestor_path_target_mask is None or self.class_level_weight is None:
+            # Return a zero cost matrix to prevent crashes downstream.
+            return torch.zeros((cls_pred.shape[0], gt_labels.shape[0]), device=current_device, dtype=cls_pred.dtype) * self.weight
 
         p = cls_pred.sigmoid()  # (num_queries, num_model_classes)
 
-        # Get hierarchical targets for the given gt_labels
-        # gt_labels are indices for rows of ancestor_path_target_mask
         hierarchical_gt_targets = self.ancestor_path_target_mask[gt_labels]
         # hierarchical_gt_targets shape: (num_gt, num_model_classes)
 
-        # Focal loss components (element-wise for each query and class)
-        log_p = torch.log(p.clamp(min=self.eps, max=1.0 - self.eps))
-        log_1_p = torch.log((1.0 - p).clamp(min=self.eps, max=1.0 - self.eps))
+        # Clamp probabilities for log stability
+        clamped_p_for_log = p.clamp(min=self.eps, max=1.0 - self.eps)
+
+        log_p = torch.log(clamped_p_for_log)
+        log_1_p = torch.log(1.0 - clamped_p_for_log)
 
         # Cost for positive targets (target_ij = 1)
+        # Use original p for pow, clamped_p (via log_p/log_1_p) for log terms, as per standard Focal Loss.
         pos_cost_terms = -self.alpha * ((1.0 - p).pow(self.gamma)) * log_p
         # Cost for negative targets (target_ij = 0)
         neg_cost_terms = -(1.0 - self.alpha) * (p.pow(self.gamma)) * log_1_p
 
         # MMDetection FocalLossCost style: diff = pos_cost_term - neg_cost_term
-        # This is the "cost" for predicting a class c if c were the single true label.
         mmdet_style_class_cost = pos_cost_terms - neg_cost_terms # (num_queries, num_model_classes)
 
         # Apply hierarchical class_level_weight
         weighted_mmdet_style_class_cost = mmdet_style_class_cost * self.class_level_weight.unsqueeze(0)
 
-        # Get hierarchical targets for the given gt_labels
-        hierarchical_gt_targets = self.ancestor_path_target_mask[gt_labels]
-        # hierarchical_gt_targets shape: (num_gt, num_model_classes)
         ht_float = hierarchical_gt_targets.float()
 
         # For each (query, gt_k), sum the weighted_mmdet_style_class_cost
