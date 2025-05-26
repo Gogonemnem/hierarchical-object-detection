@@ -14,8 +14,7 @@ set -e
 
 # Option 2: Find all python files in a specific directory (uncomment to use)
 CONFIG_DIRS=(
-    "configs/embedding_dino/hierarchical_models/separate"
-    "configs/embedding_dino/hierarchical_models/shared"
+    "configs/test"
     # Add more directories here
 )
 
