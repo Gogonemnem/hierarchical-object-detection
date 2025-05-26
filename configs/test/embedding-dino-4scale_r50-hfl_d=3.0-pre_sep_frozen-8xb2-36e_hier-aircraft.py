@@ -1,7 +1,20 @@
 _base_ = [
-    '../dino-4scale_r50_improved_8xb2_hier-aircraft.py',
+    '../embedding_dino/hierarchical_models/dino-4scale_r50_improved_8xb2_hier-aircraft.py',
 ]
+# learning policy
+max_epochs = 36
+train_cfg = dict(
+    type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 
+param_scheduler = [
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=max_epochs,
+        by_epoch=True,
+        milestones=[30],
+        gamma=0.1)
+]
 custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
 
 # load_from = "work_dirs/frozen-4scale_r50_improved_8xb2/epoch_19.pth"
@@ -12,15 +25,15 @@ model = dict(
         type='EmbeddingDINOHead',
         cls_curvature=0.0,
         share_cls_layer=False,
+        freeze_cls_embeddings=True,
         loss_embed=dict(
             type='EntailmentConeLoss',
-            beta=0.1,
-            init_norm_upper_offset=0.5,
-            loss_weight=1.0
-            ),
+        ),
         loss_cls=dict(
             type='HierarchicalFocalLoss',
-            decay=3,)
+            ann_file=data_root + 'aircraft_test.json',
+            decay=3.0,
+        )
     ),
     # training and testing settings
     train_cfg=dict(
@@ -31,7 +44,7 @@ model = dict(
                     type='HierarchicalFocalLossCost',
                     weight=2.0,
                     ann_file=data_root + 'aircraft_test.json',
-                    decay=3,
+                    decay=3.0
                 ),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
@@ -39,11 +52,18 @@ model = dict(
 )
 
 train_dataloader = dict(
-    batch_size=2,
+    batch_size=1,
 )
 val_dataloader = dict(
-    batch_size=10,
+    batch_size=1,
 )
 test_dataloader = dict(
     batch_size=1,
+)
+
+# Prototype Pre-training Configuration
+prototype_pretrain_cfg = dict(
+    enable=True,          # Set to False to disable pre-training
+    epochs=1000,          # Number of epochs for pre-training
+    force_pretrain=False  # Set to True to always re-run pre-training even if a checkpoint exists
 )

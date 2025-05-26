@@ -39,10 +39,9 @@ model = dict(
         share_cls_layer=dict(
             _delete_=True,
             type='Choice', options=[True, False]),
-        # freeze_cls_embeddings=dict(
-        #     _delete_=True,
-        #     type='Choice', options=[True, False]),
-        freeze_cls_embeddings=False,
+        freeze_cls_embeddings=dict(
+            _delete_=True,
+            type='Choice', options=[True, False]),
         loss_embed=dict(
             _delete_=True,
             type='Choice',
@@ -63,7 +62,6 @@ model = dict(
             ]
         ),
         loss_cls=dict(
-            # _delete_=True,
             type='HierarchicalFocalLoss',
             ann_file=data_root + 'aircraft_test.json',
             decay="hpo_ref:shared_decay"
@@ -97,10 +95,9 @@ test_dataloader = dict(
 
 # Prototype Pre-training Configuration
 prototype_pretrain_cfg = dict(
-    enable=True,  # Set to True to enable prototype pre-training
-    # enable=dict(
-    #     _delete_=True,
-    #     type='Choice', options=[True, False]),  # Set to False to disable pre-training
-    epochs=100,       # Number of epochs for pre-training
+    enable=dict(
+        _delete_=True,
+        type='Choice', options=[True, False]),  # Set to False to disable pre-training
+    epochs=100,           # Number of epochs for pre-training
     force_pretrain=False  # Set to True to always re-run pre-training even if a checkpoint exists
 )
