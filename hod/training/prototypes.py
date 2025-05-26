@@ -118,6 +118,20 @@ def perform_prototype_pretraining(
             )
     
     print(f"Info: Using primary EmbeddingClassifier: {type(primary_embedding_classifier).__name__} for optimization.")
+
+    # Ensure embeddings are trainable for pre-training.
+    print(f"Info: Forcing embeddings of primary {type(primary_embedding_classifier).__name__} to be trainable for pre-training.")
+    if hasattr(primary_embedding_classifier, 'embeddings') and isinstance(primary_embedding_classifier.embeddings, torch.nn.Parameter):
+        primary_embedding_classifier.embeddings.requires_grad_(True)
+        print(f"Info: Set {type(primary_embedding_classifier).__name__}.embeddings.requires_grad = True")
+    elif hasattr(primary_embedding_classifier, 'prototypes') and isinstance(primary_embedding_classifier.prototypes, torch.nn.Parameter):
+        # Assuming 'prototypes' is the alternative name for the learnable embeddings
+        primary_embedding_classifier.prototypes.requires_grad_(True)
+        print(f"Info: Set {type(primary_embedding_classifier).__name__}.prototypes.requires_grad = True")
+    else:
+        # This situation should ideally be caught by the subsequent check for parameters to optimize.
+        print(f"Warning: Could not find .embeddings or .prototypes on {type(primary_embedding_classifier).__name__} to explicitly set requires_grad=True for pre-training.")
+
     # --- End primary_embedding_classifier identification ---
 
     # --- Collect ALL EmbeddingClassifier instances for parameter copying ---
@@ -167,15 +181,15 @@ def perform_prototype_pretraining(
         if not isinstance(optimizer_cfg_original, (dict, Config)):
             raise ValueError(f"cfg.optim_wrapper.optimizer is not a dictionary-like object, got {type(optimizer_cfg_original)}.")
             
-        optimizer_config = copy.deepcopy(optimizer_cfg_original) # Use deepcopy
-        optimizer_config['params'] = params_to_optimize # Set the specific parameters to optimize
+        optimizer_config_for_build = copy.deepcopy(dict(optimizer_cfg_original)) # Ensure it's a dict for modification
+        optimizer_config_for_build['params'] = params_to_optimize # Set the specific parameters to optimize
         
         # Build the optimizer with only the specified parameters
-        actual_optimizer = OPTIMIZERS.build(optimizer_config)
+        actual_optimizer = OPTIMIZERS.build(optimizer_config_for_build)
         
         # Deepcopy the optim_wrapper base config and set the new optimizer
-        optim_wrapper_base_cfg = copy.deepcopy(cfg.optim_wrapper) # Use deepcopy
-        optim_wrapper_base_cfg['optimizer'] = actual_optimizer
+        optim_wrapper_base_cfg_for_build = copy.deepcopy(dict(cfg.optim_wrapper)) # Ensure it's a dict
+        optim_wrapper_base_cfg_for_build['optimizer'] = actual_optimizer
         
         # If paramwise_cfg exists, it might apply to the selected params if their names match.
         # For pre-training, usually, a simpler setup is desired.
@@ -185,14 +199,14 @@ def perform_prototype_pretraining(
         # in paramwise_cfg that you *want* to apply, then leave it.
         # For now, let's assume we want to keep it simple and potentially ignore complex paramwise rules
         # that might not apply or might be problematic for this limited set of parameters.
-        if 'paramwise_cfg' in optim_wrapper_base_cfg:
+        if 'paramwise_cfg' in optim_wrapper_base_cfg_for_build:
             print("Info: 'paramwise_cfg' found in optim_wrapper. Removing for pre-training OptimWrapper construction.")
-            del optim_wrapper_base_cfg['paramwise_cfg'] # Ensure this is active
+            del optim_wrapper_base_cfg_for_build['paramwise_cfg'] # Ensure this is active
 
-        optim_wrapper_instance = OPTIM_WRAPPERS.build(optim_wrapper_base_cfg)
+        optim_wrapper_instance = OPTIM_WRAPPERS.build(optim_wrapper_base_cfg_for_build)
         
-        effective_lr = optimizer_config.get('lr', 'N/A')
-        optimizer_type_str = optimizer_config.get('type', 'N/A')
+        effective_lr = optimizer_config_for_build.get('lr', 'N/A')
+        optimizer_type_str = optimizer_config_for_build.get('type', 'N/A')
         print(f"Info: Successfully built OptimWrapper for pre-training with optimizer: {optimizer_type_str} with LR: {effective_lr}")
 
     except Exception as e:
