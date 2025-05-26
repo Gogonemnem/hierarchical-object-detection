@@ -51,16 +51,6 @@ model = dict(
             ])),
 )
 
-train_dataloader = dict(
-    batch_size=1,
-)
-val_dataloader = dict(
-    batch_size=1,
-)
-test_dataloader = dict(
-    batch_size=1,
-)
-
 # Prototype Pre-training Configuration
 prototype_pretrain_cfg = dict(
     enable=True,          # Set to False to disable pre-training
