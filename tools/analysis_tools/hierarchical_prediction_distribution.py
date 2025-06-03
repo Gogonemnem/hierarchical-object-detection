@@ -193,15 +193,15 @@ def analyze_per_img_dets(confusion_matrix,
         confusion_matrix[gt_label, -1] += 1
 
 
-def calculate_hierarchy_bias(dataset, confusion_matrix):
-    """Calculate the hierarchy bias including siblings and cousins.
+def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix):
+    """Calculate the hierarchical prediction distribution including siblings and cousins.
 
     Args:
         dataset (Dataset): Test or val dataset.
         confusion_matrix (ndarray): The confusion matrix,
             has shape (num_classes + 1, num_classes + 1).
     """
-    assert 'taxonomy' in dataset.metainfo, "No taxonomy available for bias calculation. Exiting."
+    assert 'taxonomy' in dataset.metainfo, "No taxonomy available for prediction distribution calculation. Exiting."
     
     # Initialize core data structures
     tree = HierarchyTree(dataset.metainfo['taxonomy'])
@@ -270,7 +270,7 @@ def calculate_hierarchy_bias(dataset, confusion_matrix):
             total_stats[key] += value
     
     total_stats.update(get_additional_stats(total_stats))
-    print_hierarchy_bias(stats)
+    print_hierarchical_prediction_distribution(stats)
     return stats
 
 
@@ -293,13 +293,13 @@ def get_additional_stats(stats):
         'other_class': total_gt - total_tp - stats['fn']
     }
 
-def print_hierarchy_bias(stats):
-    """Print the hierarchy bias statistics.
+def print_hierarchical_prediction_distribution(stats):
+    """Print the hierarchical prediction distribution statistics.
 
     Args:
-        stats (dict): The hierarchy bias statistics.
+        stats (dict): The hierarchical prediction distribution statistics.
     """
-    print("\nHierarchical Prediction Bias Analysis (Leaf Nodes):")
+    print("\nHierarchical Prediction Distribution Analysis (Leaf Nodes):")
     header = (f"{'GT Leaf Class':<15} | {'Total GT':>8} | {'TP':>6} | {'Parent':>8} | {'G.Parent':>9} | {'Sibling':>8} | "
               f"{'Cousin':>8} | {'Ancestor':>8} | {'%Parent':>8} | {'%G.Parent':>10} | {'%Sibling':>9} | {'%Cousin':>8} | "
               f"{'%Ancestor':>9} | {'FN':>6}")
@@ -614,10 +614,10 @@ def _organize_classes_by_hierarchy(stats, dataset, max_hierarchy_levels=None):
 def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='', dataset=None, 
                                      show_hierarchy_labels=True, show_sample_overlay=False, use_log_scale=False, max_hierarchy_levels=None, aggregate_at_level=None):
     """
-    Plots a stacked percentage bar chart for hierarchical bias with improved organization.
+    Plots a stacked percentage bar chart for hierarchical prediction distribution with improved organization.
     
     Args:
-        stats: Dictionary containing hierarchical bias statistics
+        stats: Dictionary containing hierarchical prediction distribution statistics
         save_dir: Directory to save the plot
         show: Whether to display the plot
         title_suffix: Additional text for plot title
@@ -837,7 +837,7 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
     if save_dir:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        save_path = os.path.join(save_dir, f'hierarchical_bias_stacked_bar{title_suffix.replace(" ", "_")}.png')
+        save_path = os.path.join(save_dir, f'hierarchical_prediction_distribution_stacked_bar{title_suffix.replace(" ", "_")}.png')
         plt.savefig(save_path, bbox_inches='tight')
         print(f"Stacked bar chart saved to {save_path}")
     if show:
@@ -954,7 +954,7 @@ def main():
                                                   args.nms_iou_thr,
                                                   args.tp_iou_thr)
     
-    stats = calculate_hierarchy_bias(dataset, confusion_matrix)
+    stats = calculate_hierarchical_prediction_distribution(dataset, confusion_matrix)
 
     plot_stacked_percentage_bar_chart(
         stats, 
