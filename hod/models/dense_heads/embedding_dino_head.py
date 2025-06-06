@@ -36,7 +36,7 @@ class EmbeddingDINOHead(DINOHead):
                 Example config:
                 loss_embed=dict(
                     type='EntailmentConeLoss',
-                    cone_beta=0.1,
+                    beta=0.1,
                     init_norm_upper_offset=0.5,
                     loss_weight=1.0
                     num_negative_samples_per_positive=1,
@@ -61,7 +61,7 @@ class EmbeddingDINOHead(DINOHead):
         self.beta = 0.0
         self.init_norm_upper_offset = 0.0
         if self.use_cone:
-            self.beta = loss_embed['beta']
+            self.beta = loss_embed.get('beta', 0.1)
             self.init_norm_upper_offset = loss_embed.pop('init_norm_upper_offset', 0.0)
         super().__init__(**kwargs)
 
@@ -297,6 +297,7 @@ class EmbeddingDINOHead(DINOHead):
         results.bboxes = det_bboxes
         results.scores = scores
         results.labels = det_labels
+        results.bbox_index = bbox_index
         return results
 
     def has_activated_descendant(self, p_idx, cls_probs, threshold):

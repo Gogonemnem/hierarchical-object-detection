@@ -25,7 +25,7 @@ class HierarchyNode:
         Returns a list of all descendant class names.
         """
         descendants = []
-        stack = [self]
+        stack: List['HierarchyNode'] = [self]
         while stack:
             node = stack.pop()
             descendants.append(node.name)
@@ -50,7 +50,9 @@ class HierarchyNode:
 
     def __repr__(self) -> str:
         return self.name
-    def __eq__(self, other: 'HierarchyNode') -> bool:
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, HierarchyNode):
+            return False
         return self.name == other.name and self.children == other.children
     def __lt__(self, other: 'HierarchyNode') -> bool:
         return self.name < other.name
@@ -89,6 +91,39 @@ class HierarchyTree:
 
     def all_classes(self) -> List[str]:
         return list(self.class_to_node.keys())
+
+    def get_siblings(self, cls_name: str) -> List[str]:
+        """Get sibling class names (same parent, excluding itself)."""
+        node = self.class_to_node[cls_name]
+        if node.parent is None:
+            return []  # Root has no siblings
+        return [child.name for child in node.parent.children if child.name != cls_name]
+    
+    def get_grandparent(self, cls_name: str) -> str | None:
+        """Get grandparent class name (parent's parent)."""
+        node = self.class_to_node[cls_name]
+        if node.parent is None or node.parent.parent is None:
+            return None  # Root or children of root have no grandparent
+        return node.parent.parent.name
+
+    def get_cousins(self, cls_name: str) -> List[str]:
+        """Get cousin class names (children of parent's siblings) and parent's siblings themselves."""
+        node = self.class_to_node[cls_name]
+        if node.parent is None or node.parent.parent is None:
+            return []  # Root or children of root have no cousins
+        
+        cousins = []
+        # Get parent's siblings
+        parent_siblings = [child for child in node.parent.parent.children 
+                          if child.name != node.parent.name]
+        
+        # Include parent's siblings themselves (cousin parents)
+        cousins.extend([sibling.name for sibling in parent_siblings])
+        
+        # Get all children of parent's siblings (traditional cousins)
+        for sibling in parent_siblings:
+            cousins.extend([child.name for child in sibling.children])
+        return cousins
 
     def get_leaf_nodes(self) -> List[HierarchyNode]:
         return [node for node in self.class_to_node.values() if node.is_leaf()]
