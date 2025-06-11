@@ -15,7 +15,8 @@ class EmbeddingClassifier(nn.Module):
     def __init__(self,
                  in_features,
                  out_features,
-                 bias: bool=True,
+                 use_bias: bool=True,
+                 use_temperature: bool=True,
                  curvature: float=0.0,
                  use_cone: bool=False,
                  cone_beta: float=0.1,
@@ -30,6 +31,7 @@ class EmbeddingClassifier(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.use_cone = use_cone
+        self.use_temperature = use_temperature
         assert curvature <= 0.0, "curvature must be == 0.0 (Euclidean space) or -1.0 (Hyperbolic Poincaré space)"
         self.curvature = curvature
 
@@ -51,11 +53,16 @@ class EmbeddingClassifier(nn.Module):
         # Set requires_grad based on the new parameter
         if freeze_embeddings:
             self.embeddings.requires_grad_(False)
-        if bias:
+        if use_bias:
             self.geometric_bias = Parameter(torch.empty(1, **factory_kwargs))
         else:
             self.register_parameter("geometric_bias", None)
-        self.logit_scale = nn.Parameter(torch.tensor(1.0).log())  # log(1.0) = 0.0
+        
+        if use_temperature:
+            self.logit_scale = nn.Parameter(torch.tensor(1.0).log())  # log(1.0) = 0.0
+        else:
+            self.register_parameter("logit_scale", None)
+        
         self.reset_parameters(init_norm_upper_offset)
 
     def reset_parameters(self, init_norm_upper_offset=None) -> None:
@@ -176,8 +183,13 @@ class EmbeddingClassifier(nn.Module):
             dists = self.pairwise_poincare_distance(features, embeddings)
         else:
             raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
-        scale = self.logit_scale.exp().clamp(max=100)
-        logits = -dists * scale
+        
+        if self.use_temperature and self.logit_scale is not None:
+            scale = self.logit_scale.exp().clamp(max=100)
+            logits = -dists * scale
+        else:
+            logits = -dists
+        
         return logits
 
     def pairwise_poincare_distance(self, x, y, eps=1e-5,

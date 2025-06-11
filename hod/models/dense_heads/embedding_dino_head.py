@@ -20,7 +20,7 @@ class EmbeddingDINOHead(DINOHead):
                  ann_file='',
                  cls_curvature=0.0,
                  share_cls_layer=True,
-                 freeze_cls_embeddings: bool=False,
+                 cls_config: OptConfigType=None,
                  loss_embed: OptConfigType=None,
                  **kwargs):
         """
@@ -30,6 +30,15 @@ class EmbeddingDINOHead(DINOHead):
             cls_curvature (float): Curvature parameter for the embedding space.
             share_cls_layer (bool): Whether to share the classification
                 layer across all prediction layers.
+            
+            cls_config (dict, optional): Configuration for the classification
+                layer. Defaults to None (uses default values).
+                Example config:
+                cls_config=dict(
+                    use_bias=True,
+                    use_temperature=True,
+                    freeze_embeddings=True, Whether to freeze the class embeddings during training.
+                )
             loss_embed (dict, optional): Configuration for the
                 embedding loss.
                 Defaults to None (disabled).
@@ -37,7 +46,6 @@ class EmbeddingDINOHead(DINOHead):
                 loss_embed=dict(
                     type='EntailmentConeLoss',
                     beta=0.1,
-                    init_norm_upper_offset=0.5,
                     loss_weight=1.0
                     num_negative_samples_per_positive=1,
                     margin=0.1,
@@ -48,27 +56,34 @@ class EmbeddingDINOHead(DINOHead):
                     decay=1.0,
                 )
         """
-        self.curvature = cls_curvature
         self.share_cls_layer = share_cls_layer
-        self.freeze_cls_embeddings = freeze_cls_embeddings
+        
+        # Set default cls_config and merge with provided config
+        default_cls_config = {}
+        self.cls_config = default_cls_config.copy()
+        if cls_config and isinstance(cls_config, dict):
+            self.cls_config.update(cls_config)
+
+        self.cls_config['curvature'] = cls_curvature
+
         use_embed_loss = loss_embed and isinstance(loss_embed, dict)
-        self.use_cone = use_embed_loss and loss_embed.get('type', None) == "EntailmentConeLoss" and loss_embed.get('loss_weight', 0.0) > 0
-        self.use_contrastive = use_embed_loss and loss_embed.get('type', None) == "HierarchicalContrastiveLoss" and loss_embed.get('loss_weight', 0.0) > 0
+        self.use_cone = use_embed_loss and (loss_embed or {}).get('type', None) == "EntailmentConeLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
+        self.cls_config['use_cone'] = self.use_cone
+
+        self.use_contrastive = use_embed_loss and (loss_embed or {}).get('type', None) == "HierarchicalContrastiveLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
+
         self.tree = None
         self.load_taxonomy(ann_file)
         self._build_parent_children_index_map()
-            
-        self.beta = 0.0
-        self.init_norm_upper_offset = 0.0
-        if self.use_cone:
-            self.beta = loss_embed.get('beta', 0.1)
-            self.init_norm_upper_offset = loss_embed.pop('init_norm_upper_offset', 0.0)
+
+        if self.use_cone and loss_embed:
+            self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
+
+            loss_embed['curvature'] = cls_curvature
+
         super().__init__(**kwargs)
 
-        if self.use_cone:
-            loss_embed['curvature'] = cls_curvature
-        
-        if use_embed_loss:
+        if use_embed_loss and loss_embed:
             loss_embed['ann_file'] = ann_file
             self.loss_embed = MODELS.build(loss_embed)
 
@@ -101,20 +116,17 @@ class EmbeddingDINOHead(DINOHead):
     def _init_layers(self, *args) -> None:
         """Initialize classification branch of head."""
         super()._init_layers(*args)
-        full_taxonomy = len(self.tree) == self.cls_out_channels
-        clip_exempt = None
+        full_taxonomy = (self.tree is not None) and (len(self.tree) == self.cls_out_channels)
+
         if full_taxonomy:
             root_idx  = self.class_to_idx[self.tree.root.name]
             clip_exempt = [root_idx]
 
+            self.cls_config['clip_exempt_indices'] = clip_exempt
+
         fc_cls = EmbeddingClassifier(self.embed_dims,
                                      self.cls_out_channels,
-                                     curvature=self.curvature,
-                                     use_cone=self.use_cone,
-                                     cone_beta=self.beta,
-                                     init_norm_upper_offset=self.init_norm_upper_offset,
-                                     clip_exempt_indices=clip_exempt,
-                                     freeze_embeddings=self.freeze_cls_embeddings,)
+                                     **self.cls_config)
 
         if self.share_cls_layer:
             self.cls_branches = nn.ModuleList(
