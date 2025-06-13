@@ -45,19 +45,19 @@ The clustering is due to the probability transformation, not geometric differenc
 
 import argparse
 import colorsys
-import math
 import os
 import pathlib
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple, Set
-import os
-import traceback
+from dataclasses import dataclass
 import cv2  # type: ignore
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 import numpy as np
 import torch
 import umap
@@ -79,7 +79,6 @@ try:
 except ImportError:
     PCA_AVAILABLE = False
 from adjustText import adjust_text
-from matplotlib.axes import Axes
 import matplotlib.patheffects as path_effects
 from mmdet.apis import init_detector, inference_detector
 
@@ -95,13 +94,384 @@ def safe_load(*args, **kwargs):
 torch.load = safe_load
 
 
-def get_last_classification_branch_index_from_state(state_dict):
+# -----------------------------------------------------------------------------
+# Image Processing Utilities
+# -----------------------------------------------------------------------------
+
+def crop_image_from_bbox(image_path: str, bbox: np.ndarray, expand_factor: float = 1.2) -> Optional[np.ndarray]:
+    """
+    Unified image cropping function with padding and error handling.
+    
+    Args:
+        image_path: Path to the image file
+        bbox: Bounding box [x1, y1, x2, y2]
+        expand_factor: Factor to expand the crop region (default: 1.2)
+        
+    Returns:
+        Optional[np.ndarray]: Cropped and resized image, or None if extraction fails
+    """
+    try:
+        # Load image
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Extract and expand bounding box
+        x1, y1, x2, y2 = bbox.astype(int)
+        
+        # Calculate expanded dimensions
+        width = x2 - x1
+        height = y2 - y1
+        expand_w = int((expand_factor - 1) * width / 2)
+        expand_h = int((expand_factor - 1) * height / 2)
+        
+        # Apply expansion with image boundary constraints
+        x1_exp = max(0, x1 - expand_w)
+        y1_exp = max(0, y1 - expand_h)
+        x2_exp = min(img_rgb.shape[1], x2 + expand_w)
+        y2_exp = min(img_rgb.shape[0], y2 + expand_h)
+        
+        # Validate expanded region
+        if x2_exp <= x1_exp or y2_exp <= y1_exp:
+            return None
+            
+        # Extract crop
+        crop = img_rgb[y1_exp:y2_exp, x1_exp:x2_exp]
+        
+        # Add padding if crop is too small
+        if crop.shape[0] < 32 or crop.shape[1] < 32:
+            pad_h = max(0, 32 - crop.shape[0])
+            pad_w = max(0, 32 - crop.shape[1])
+            crop = np.pad(crop, ((pad_h//2, pad_h-pad_h//2), (pad_w//2, pad_w-pad_w//2), (0, 0)), 
+                         mode='constant', constant_values=128)
+        
+        return crop
+        
+    except Exception as e:
+        print(f"Error cropping image from {image_path}: {e}")
+        return None
+
+
+def resize_image_for_display(img: np.ndarray, target_size: int = 96) -> np.ndarray:
+    """
+    Resize image for display while maintaining aspect ratio.
+    
+    Args:
+        img: Input image array
+        target_size: Target size for the larger dimension
+        
+    Returns:
+        np.ndarray: Resized image
+    """
+    try:
+        return cv2.resize(img, (target_size, target_size))
+    except Exception as e:
+        print(f"Error resizing image: {e}")
+        # Return a placeholder if resize fails
+        return np.full((target_size, target_size, 3), 128, dtype=np.uint8)
+
+
+# =============================================================================
+# CONFIGURATION AND DATA STRUCTURES
+# =============================================================================
+
+@dataclass
+class VisualizationConfig:
+    """Unified configuration for all visualization parameters."""
+    
+    # Core parameters
+    target_examples: int = 20
+    batch_size: int = 50
+    max_batches: int = 30
+    min_score: float = 0.25
+    iou_threshold: float = 0.5
+    random_state: int = 42
+    
+    # Projection method
+    use_mds: bool = False
+    umap_n_neighbors: int = 15
+    umap_min_dist: float = 0.1
+    umap_spread: float = 1.0
+    joint_n_neighbors: int = 10
+    joint_min_dist: float = 0.05
+    
+    # PCA preprocessing
+    apply_pca: bool = True
+    pca_components: int = 50
+    min_samples_for_pca: int = 50
+    
+    # Validation parameters
+    validation_sample_size: int = 10
+    min_confidence_score: float = 0.3
+    diversity_check_threshold: int = 60
+    high_conf_threshold: int = 200
+
+
+@dataclass
+class ValidationResult:
+    """Results from nearest neighbor validation."""
+    
+    space_name: str
+    sample_size: int
+    matches: int
+    match_rate: float
+    detailed_results: List[Dict[str, Any]] # Will now include names for mismatches
+    
+    def print_summary(self):
+        """Print validation summary, including mismatch details."""
+        print(f"\n{self.space_name} space validation: Nearest neighbor = Prediction")
+        print(f"Prediction accuracy via nearest neighbor: {self.matches}/{self.sample_size} ({self.match_rate:.1%})")
+        
+        if self.match_rate >= 0.9:
+            print("✅ Excellent: Nearest neighbor matches prediction")
+        elif self.match_rate >= 0.7:
+            print("⚠️ Good: Most nearest neighbors match predictions")
+        elif self.match_rate >= 0.5:
+            print("⚠️ Moderate: Some nearest neighbors match predictions")
+        else:
+            print("❌ Poor: Nearest neighbors often don't match predictions")
+
+        # Print details for mismatches
+        if self.sample_size > 0 and self.matches < self.sample_size:
+            print("Mismatch Details (Predicted vs. Nearest Neighbor in this space):")
+            for res in self.detailed_results:
+                if not res.get('matches', True): # If 'matches' is False or missing (though it should be there)
+                    pred_name = res.get('predicted_class_name', f"Idx {res['prediction']}")
+                    nn_name = res.get('nn_class_name', f"Idx {res['nearest_neighbor']}")
+                    print(f"  - Query {res['query_idx']}: Model Predicted: '{pred_name}', but NN was: '{nn_name}' (Dist: {res.get('distance', 'N/A'):.4f})")
+# =============================================================================
+# VISUALIZATION MANAGER CLASS
+# =============================================================================
+
+@dataclass
+class VisualizationManager:
+    """
+    Professional visualization manager for hierarchical UMAP plots.
+    
+    Provides consistent styling, component organization, and publication-quality 
+    formatting for all visualization elements including prototypes, detection 
+    overlays, legends, and axes.
+    """
+    figure_size: Tuple[int, int] = (20, 18)
+    dpi: int = 120
+    background_color: str = '#f9f9f9'
+    grid_alpha: float = 0.2
+    spine_color: str = '#888888'
+    spine_width: float = 0.8
+    
+    # Detection border styling
+    border_width: int = 6
+    outline_color: Tuple[int, int, int] = (40, 40, 40)
+    padding_color: Tuple[int, int, int] = (255, 255, 255)
+    final_outline_color: Tuple[int, int, int] = (50, 50, 50)
+    
+    # Text styling
+    title_fontsize: int = 16
+    label_fontsize: int = 14
+    legend_fontsize: int = 9
+    legend_title_fontsize: int = 11
+    text_overlay_fontsize: float = 8.5
+    
+    def create_figure(self) -> Tuple[Figure, Axes]:
+        """Create a professionally styled figure and axes."""
+        plt.style.use('seaborn-v0_8-whitegrid')
+        
+        fig, ax = plt.subplots(figsize=self.figure_size, dpi=self.dpi)
+        
+        # Professional background
+        ax.set_facecolor(self.background_color)
+        fig.patch.set_facecolor('white')
+        
+        return fig, ax
+    
+    def style_axes(self, ax: Axes, projection_name: str):
+        """Apply professional styling to axes."""
+        # Set labels with proper spacing
+        ax.set_xlabel(f"{projection_name} Dimension 1", 
+                     fontsize=self.label_fontsize, labelpad=15)
+        ax.set_ylabel(f"{projection_name} Dimension 2", 
+                     fontsize=self.label_fontsize, labelpad=15)
+        
+        # Maintain aspect ratio
+        ax.set_aspect('equal', adjustable='box')
+        
+        # Clean tick styling
+        ax.tick_params(axis='both', which='both', bottom=False, top=False, 
+                      left=False, right=False, labelbottom=False, labelleft=False)
+        
+        # Subtle grid
+        ax.grid(True, linestyle='--', alpha=self.grid_alpha, color='gray')
+        
+        # Professional borders
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color(self.spine_color)
+            spine.set_linewidth(self.spine_width)
+    
+    def set_title(self, ax: Axes, model_name: str, projection_name: str):
+        """Set a professional title with proper formatting."""
+        # Clean up model name
+        clean_name = pathlib.Path(model_name).stem.replace('_', ' ').title()
+        if len(clean_name) > 30:
+            clean_name = clean_name[:27] + "..."
+        
+        title = (f"{projection_name} Visualization of Prototype Embeddings with Detection Examples\n"
+                f"GT-Prediction Relationship Analysis | {clean_name}")
+        
+        ax.set_title(title, fontsize=self.title_fontsize, pad=20, fontweight='bold')
+    
+    def create_detection_legend(self, ax: Axes):
+        """Create a professional legend for detection border colors."""
+        import matplotlib.patches as patches
+        
+        legend_items = [
+            (0, 'Exact Match (correct prediction)', '#2E8B57'),
+            (1, 'Parent (prediction too general)', '#66CDAA'),
+            (2, 'Grandparent (prediction very general)', '#90EE90'),
+            (3, 'Sibling (same parent class)', '#87CEEB'),
+            (4, 'Cousin (related class)', '#DDA0DD'),
+            (5, 'Off-branch (unrelated class)', '#DC143C')
+        ]
+        
+        # Create professional legend elements
+        legend_elements = []
+        for _level, label, color in legend_items:
+            rect = patches.Rectangle((0, 0), 1, 1, linewidth=3, 
+                                   edgecolor=color, facecolor='white', alpha=0.95)
+            legend_elements.append((rect, label))
+        
+        # Add styled legend
+        legend = ax.legend([elem[0] for elem in legend_elements], 
+                          [elem[1] for elem in legend_elements],
+                          loc='upper left', bbox_to_anchor=(0.01, 0.99), 
+                          fontsize=self.legend_fontsize, 
+                          title="GT-Prediction Relationships", 
+                          title_fontsize=self.legend_title_fontsize,
+                          frameon=True, fancybox=True, shadow=True, 
+                          framealpha=0.95, ncol=1)
+        
+        # Professional legend styling
+        legend.get_frame().set_facecolor('#fcfcfc')
+        legend.get_frame().set_edgecolor('#888888')
+        legend.get_frame().set_linewidth(1.0)
+        legend.get_title().set_fontweight('bold')
+    
+    def add_professional_border(self, img: np.ndarray, encoding: Dict[str, Any]) -> np.ndarray:
+        """Add publication-quality colored border to detection images."""
+        color = encoding['color']
+        
+        # Convert color to BGR for OpenCV
+        if isinstance(color, str):
+            color_rgb = mcolors.to_rgb(color)
+            color_bgr = [int(c * 255) for c in color_rgb[::-1]]
+        else:
+            color_bgr = color
+        
+        # Professional multi-layer border
+        # 1. Thin dark outline
+        img_outlined = cv2.copyMakeBorder(img, 1, 1, 1, 1, 
+                                        cv2.BORDER_CONSTANT, value=self.outline_color)
+        
+        # 2. White padding for separation
+        img_padded = cv2.copyMakeBorder(img_outlined, 2, 2, 2, 2, 
+                                       cv2.BORDER_CONSTANT, value=self.padding_color)
+        
+        # 3. Main colored border
+        img_bordered = cv2.copyMakeBorder(img_padded, 
+                                         self.border_width, self.border_width, 
+                                         self.border_width, self.border_width,
+                                         cv2.BORDER_CONSTANT, value=color_bgr)
+        
+        # 4. Final outline for definition
+        final_border = cv2.copyMakeBorder(img_bordered, 1, 1, 1, 1,
+                                        cv2.BORDER_CONSTANT, 
+                                        value=self.final_outline_color)
+        
+        return final_border
+    
+    def add_text_overlay(self, ax: Axes, x: float, y: float, 
+                        gt_leaf: str, pred_node: str, fallback_level: int, 
+                        confidence: float):
+        """Add professional text overlay with color-coded styling."""
+        # Get fallback level styling
+        encoding = get_fallback_visual_encoding(fallback_level)
+        text_color = encoding['color']
+        
+        # Format label text
+        label_text = f"GT: {gt_leaf}\nPred: {pred_node}\nConf: {confidence:.2f}"
+        
+        # Create light background color
+        rgb_color = mcolors.to_rgb(text_color)
+        light_color_rgb = tuple([min(1.0, c * 0.2 + 0.8) for c in rgb_color])
+        
+        # Professional text box
+        text_box = dict(
+            boxstyle='round,pad=0.4,rounding_size=0.3',
+            facecolor=light_color_rgb,
+            edgecolor=text_color,
+            alpha=0.85,
+            linewidth=2.0
+        )
+        
+        # Add text with professional styling
+        text = ax.text(
+            x, y, label_text,
+            fontsize=self.text_overlay_fontsize,
+            color='black',
+            weight='bold',
+            ha='center', va='top',
+            zorder=11,
+            linespacing=1.2,
+            bbox=text_box
+        )
+        
+        # Add text outline for better readability
+        text.set_path_effects([
+            path_effects.withStroke(linewidth=0.8, foreground='white')
+        ])
+    
+    def finalize_plot(self, fig: Figure):
+        """Apply final professional touches to the plot."""
+        fig.tight_layout(pad=2.5)
+    
+    def save_figure(self, fig: Figure, save_path: str, model_path: str, 
+                   num_examples: int) -> str:
+        """Save figure with professional metadata and naming."""
+        # Generate detailed filename
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
+        base, ext = os.path.splitext(save_path)
+        detailed_path = f"{base}_{model_name_clean}_{num_examples}ex_{timestamp}{ext}"
+        
+        # Ensure directory exists
+        save_dir = os.path.dirname(detailed_path)
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Professional metadata
+        metadata = {
+            'Title': f'UMAP visualization with {num_examples} detection examples',
+            'Author': 'Hierarchical Object Detection',
+            'Description': f'Model: {model_name_clean}, Examples: {num_examples}, Date: {timestamp}',
+            'Keywords': 'UMAP, embeddings, object detection, hierarchy'
+        }
+        
+        # Save with high quality
+        fig.savefig(detailed_path, dpi=300, bbox_inches='tight', 
+                   facecolor='white', pad_inches=0.3, metadata=metadata)
+        
+        return detailed_path
+
+
+# =============================================================================
+# MODEL UTILITIES
+# =============================================================================
+
+def get_last_classification_branch_index_from_state(state_dict: Dict[str, Any]) -> int:
     """Determine the index of the last classification branch from state_dict."""
-    # Find the highest numbered cls_branches in the state_dict
     max_branch_idx = 0
     for key in state_dict.keys():
         if 'bbox_head.cls_branches.' in key:
-            # Extract the branch number
             try:
                 branch_part = key.split('bbox_head.cls_branches.')[1]
                 branch_idx = int(branch_part.split('.')[0])
@@ -110,136 +480,245 @@ def get_last_classification_branch_index_from_state(state_dict):
                 continue
     return max_branch_idx
 
-def get_last_classification_branch_index(model):
+
+def get_last_classification_branch_index(model) -> int:
     """Determine the index of the last classification branch in the model."""
     for name, module in model.named_modules():
         if hasattr(module, 'num_pred_layer') and 'bbox_head' in name:
             return module.num_pred_layer - 1
-    # Fallback to 0 if we can't determine
-    return 0
+    return 0  # Fallback
+
+
+def get_target_classifier(model):
+    """Get the target classifier branch for embedding collection."""
+    last_branch_idx = get_last_classification_branch_index(model)
+    is_two_stage = getattr(model, 'as_two_stage', False)
+    
+    if is_two_stage:
+        target_idx = last_branch_idx - 1  # Second-to-last decoder layer
+        target_classifier = model.bbox_head.cls_branches[target_idx]
+    else:
+        target_classifier = model.bbox_head.cls_branches[last_branch_idx]
+    
+    return target_classifier
+
+
+# =============================================================================
+# EMBEDDING COLLECTION
+# =============================================================================
 
 class EmbeddingCollector:
     """
     Collects query embeddings during inference using forward hooks.
-    This provides scientifically accurate embeddings by capturing the actual
-    feature vectors that get compared to prototype embeddings during detection.
     
+    This class provides scientifically accurate embeddings by capturing the actual
+    feature vectors that get compared to prototype embeddings during detection.
     Both prototype and query embeddings come from get_projected_features and are
     in the same transformation space (256-dimensional projected features).
+    
+    Attributes:
+        embeddings (List[np.ndarray]): Collected embedding arrays from hooks
+        hook_handles (List[Tuple]): Stored hook handles for cleanup
     """
     
-    def __init__(self):
-        self.embeddings = []
-        self.hook_handles = []
+    def __init__(self) -> None:
+        """Initialize the collector with empty storage."""
+        self.embeddings: List[np.ndarray] = []
+        self.hook_handles: List[Tuple[Any, str, Any]] = []
         
-    def clear(self):
-        """Clear collected embeddings for next image"""
-        self.embeddings = []
+    def clear(self) -> None:
+        """Clear collected embeddings for next image."""
+        self.embeddings.clear()
         
-    def register_hooks(self, model):
-        """Register forward hooks on EmbeddingClassifier modules in the second-to-last classification branch"""
+    def register_hooks(self, model) -> bool:
+        """
+        Register forward hooks on EmbeddingClassifier modules.
+        
+        Hooks are placed on the second-to-last classification branch to capture
+        the actual query embeddings used for final predictions.
+        
+        Args:
+            model: The detection model with classification branches
+            
+        Returns:
+            bool: True if hooks were successfully registered, False otherwise
+        """
         hooks_registered = 0
         
-        # Determine the LAST classification branch index, then use the second-to-last
-        # In DINO, all cls_branches[0-5] are decoder layers, and we want the second-to-last (index 4)
-        last_branch_idx = get_last_classification_branch_index(model)
-        target_branch_idx = last_branch_idx - 1  # Use the SECOND-TO-LAST branch for embedding collection
-        target_branch = f'cls_branches.{target_branch_idx}'
-        print(f"Targeting classification branch: {target_branch} (branch {target_branch_idx} of {last_branch_idx+1} total - second-to-last)")
-        
-        # Scan all modules to see what EmbeddingClassifier modules we find
-        embedding_classifier_modules = []
-        for name, module in model.named_modules():
-            if hasattr(module, 'get_projected_features') and 'EmbeddingClassifier' in str(type(module)):
-                embedding_classifier_modules.append((name, module))
-                print(f"Found EmbeddingClassifier: {name}")
-        
-        # Now register hooks only on the target branch
-        for name, module in model.named_modules():
-            if hasattr(module, 'get_projected_features') and target_branch in name and 'EmbeddingClassifier' in str(type(module)):
-                print(f"Registering hook on: {name}")
-                
-                def make_hook(collector_ref, module_name):
-                    """Create a hook that captures projected features from get_projected_features"""
-                    def hook_fn(module, input, output):
-                        # The forward method calls get_projected_features internally
-                        # We need to hook the get_projected_features method to capture its output
-                        pass  # This forward hook won't directly capture what we need
-                    return hook_fn
-                
-                # Instead of hooking forward, we need to hook get_projected_features method
-                # Store original method
-                original_method = module.get_projected_features
-                
-                def make_hooked_method(orig_method, collector_ref, module_name):
-                    """Create a hooked version of get_projected_features"""
-                    def hooked_method(x):
-                        result = orig_method(x)
+        try:
+            # Determine target classification branch (second-to-last)
+            last_branch_idx = get_last_classification_branch_index(model)
+            target_branch_idx = last_branch_idx - 1
+            target_branch = f'cls_branches.{target_branch_idx}'
+            
+            print(f"Targeting classification branch: {target_branch} "
+                  f"(branch {target_branch_idx} of {last_branch_idx+1} total - second-to-last)")
+            
+            # Find and register hooks on target EmbeddingClassifier modules
+            for name, module in model.named_modules():
+                if self._is_target_module(name, module, target_branch):
+                    if self._register_single_hook(name, module):
+                        hooks_registered += 1
                         
-                        # Store the result which are our query embeddings (256-dim projected features)
-                        if hasattr(result, 'shape') and len(result.shape) >= 2:
-                            embeddings_batch = result.detach().cpu().numpy()
-                            collector_ref.embeddings.append(embeddings_batch)
-                        return result
-                    return hooked_method
+            print(f"Successfully registered {hooks_registered} hooks")
+            return hooks_registered > 0
+            
+        except Exception as e:
+            print(f"Error registering hooks: {e}")
+            # Clean up any partial registration
+            self.remove_hooks()
+            return False
+    
+    def _is_target_module(self, name: str, module: Any, target_branch: str) -> bool:
+        """Check if module is a target EmbeddingClassifier in the right branch."""
+        return (hasattr(module, 'get_projected_features') and 
+                target_branch in name and 
+                'EmbeddingClassifier' in str(type(module)))
+    
+    def _register_single_hook(self, name: str, module: Any) -> bool:
+        """Register a hook on a single EmbeddingClassifier module."""
+        try:
+            print(f"Registering hook on: {name}")
+            
+            # Store original method for restoration
+            original_method = module.get_projected_features
+            
+            # Create hooked version that captures embeddings
+            def hooked_method(x):
+                result = original_method(x)
                 
-                # Replace the method with our hooked version
-                module.get_projected_features = make_hooked_method(original_method, self, name)
+                # Store embeddings if valid tensor
+                if hasattr(result, 'shape') and len(result.shape) >= 2:
+                    embeddings_batch = result.detach().cpu().numpy()
+                    self.embeddings.append(embeddings_batch)
+                    
+                return result
+            
+            # Replace method and store for cleanup
+            module.get_projected_features = hooked_method
+            self.hook_handles.append((module, 'get_projected_features', original_method))
+            
+            print(f"Successfully registered method hook on {name}")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to register hook on {name}: {e}")
+            return False
                 
-                # Store for cleanup
-                self.hook_handles.append((module, 'get_projected_features', original_method))
-                hooks_registered += 1
-                print(f"Registered method hook on {name}")
-                
-        print(f"Successfully registered {hooks_registered} hooks")
-        return hooks_registered > 0
-                
-    def remove_hooks(self):
-        """Remove all registered hooks and clean up"""
-        for module, method_name, original_method in self.hook_handles:
-            setattr(module, method_name, original_method)
-        self.hook_handles.clear()
-        print(f"Restored all original methods")
+    def remove_hooks(self) -> None:
+        """
+        Remove all registered hooks and restore original methods.
         
-    def get_embeddings_for_detections(self, bbox_index):
-        """Extract embeddings corresponding to the detections using bbox_index.
+        This ensures proper cleanup and prevents memory leaks or interference
+        with subsequent model usage.
+        """
+        restored_count = 0
+        
+        try:
+            for module, method_name, original_method in self.hook_handles:
+                try:
+                    setattr(module, method_name, original_method)
+                    restored_count += 1
+                except Exception as e:
+                    print(f"Warning: Failed to restore method {method_name}: {e}")
+                    
+            self.hook_handles.clear()
+            
+            if restored_count > 0:
+                print(f"Successfully restored {restored_count} original methods")
+                
+        except Exception as e:
+            print(f"Error during hook cleanup: {e}")
+            # Still clear handles to prevent retry issues
+            self.hook_handles.clear()
+        
+    def get_embeddings_for_detections(self, bbox_index) -> Optional[np.ndarray]:
+        """
+        Extract embeddings corresponding to specific detections using bbox_index.
         
         Args:
             bbox_index: Tensor or array of indices indicating which queries from the 
-                       original 900 were selected for final predictions
+                       original query set were selected for final predictions
         
         Returns:
-            numpy array: Query embeddings corresponding to the selected queries
+            Optional[np.ndarray]: Query embeddings corresponding to the selected queries,
+                                 or None if extraction fails
         """
         if not self.embeddings:
+            print("Warning: No embeddings collected")
             return None
             
-        # Since we only hook the final layer, we should have one embedding array
-        if len(self.embeddings) == 1:
-            all_embeddings = self.embeddings[0]
-        else:
-            # Fallback: concatenate if multiple arrays (shouldn't happen with our targeted hook)
-            all_embeddings = np.concatenate(self.embeddings, axis=0)
-        
-        # Flatten if needed (remove batch dimension)
-        if len(all_embeddings.shape) == 3 and all_embeddings.shape[0] == 1:
-            all_embeddings = all_embeddings[0]  # Remove batch dimension
-        
-        # Convert bbox_index to numpy if it's a tensor
-        if hasattr(bbox_index, 'cpu'):
-            bbox_index = bbox_index.cpu().numpy()
-        
-        # Use bbox_index to select the correct embeddings
-        # bbox_index contains the indices of queries that were selected for predictions
         try:
-            if len(all_embeddings) > max(bbox_index):
-                selected_embeddings = all_embeddings[bbox_index]
-                return selected_embeddings
-            else:
-                print(f"Warning: Not enough embeddings ({len(all_embeddings)}) for bbox_index max {max(bbox_index)}")
+            # Consolidate embeddings into single array
+            all_embeddings = self._consolidate_embeddings()
+            if all_embeddings is None:
                 return None
+            
+            # Convert bbox_index to numpy array if needed
+            bbox_indices = self._convert_bbox_index(bbox_index)
+            if bbox_indices is None:
+                return None
+            
+            # Validate indices and extract corresponding embeddings
+            return self._extract_embeddings_by_indices(all_embeddings, bbox_indices)
+            
         except Exception as e:
-            print(f"Error selecting embeddings with bbox_index: {e}")
+            print(f"Error extracting embeddings for detections: {e}")
+            return None
+    
+    def _consolidate_embeddings(self) -> Optional[np.ndarray]:
+        """Consolidate collected embeddings into a single array."""
+        try:
+            if len(self.embeddings) == 1:
+                all_embeddings = self.embeddings[0]
+            else:
+                # Concatenate multiple arrays (fallback case)
+                all_embeddings = np.concatenate(self.embeddings, axis=0)
+                print(f"Concatenated {len(self.embeddings)} embedding arrays")
+            
+            # Remove batch dimension if present
+            if len(all_embeddings.shape) == 3 and all_embeddings.shape[0] == 1:
+                all_embeddings = all_embeddings[0]
+                
+            return all_embeddings
+            
+        except Exception as e:
+            print(f"Error consolidating embeddings: {e}")
+            return None
+    
+    def _convert_bbox_index(self, bbox_index) -> Optional[np.ndarray]:
+        """Convert bbox_index to numpy array format."""
+        try:
+            if hasattr(bbox_index, 'cpu'):
+                return bbox_index.cpu().numpy()
+            elif hasattr(bbox_index, 'numpy'):
+                return bbox_index.numpy()
+            else:
+                return np.asarray(bbox_index)
+                
+        except Exception as e:
+            print(f"Error converting bbox_index: {e}")
+            return None
+    
+    def _extract_embeddings_by_indices(self, all_embeddings: np.ndarray, 
+                                     bbox_indices: np.ndarray) -> Optional[np.ndarray]:
+        """Extract embeddings using the provided indices."""
+        try:
+            # Validate indices range
+            max_index = np.max(bbox_indices) if len(bbox_indices) > 0 else -1
+            
+            if max_index >= len(all_embeddings):
+                print(f"Warning: Index out of range - max index {max_index} "
+                      f"but only {len(all_embeddings)} embeddings available")
+                return None
+            
+            # Extract and return selected embeddings
+            selected_embeddings = all_embeddings[bbox_indices]
+            # print(f"Extracted {len(selected_embeddings)} embeddings using bbox_index")
+            return selected_embeddings
+            
+        except Exception as e:
+            print(f"Error extracting embeddings by indices: {e}")
             return None
 
     def get_embeddings_for_detections_fallback(self, num_detections):
@@ -266,153 +745,566 @@ class EmbeddingCollector:
             return all_embeddings
 
 
-def run_inference_with_hooks(model, dataset, collector, target_examples: int = 20, batch_size: int = 50, min_score: float = 0.25, max_batches: int = 30, hierarchy: HierarchyTree = None, labels: List[str] = None, iou_threshold: float = 0.5):
-    """Run inference with forward hooks to collect query embeddings in batches until we have sufficient diversity across all 6 fallback levels."""
+# =============================================================================
+# DATA COLLECTION FUNCTIONS
+# =============================================================================
+
+def run_inference_with_hooks(model, dataset, collector: EmbeddingCollector, 
+                           config: Optional[VisualizationConfig] = None,
+                           hierarchy: Optional[HierarchyTree] = None, 
+                           labels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """
+    Run inference with forward hooks to collect query embeddings.
+    
+    Processes images in batches until sufficient diversity across all 6 fallback 
+    levels is achieved or maximum batch limit is reached. Uses modular design
+    with dedicated processors for better error handling and maintainability.
+    
+    Args:
+        model: Detection model with embedding classifier
+        dataset: Dataset to process for inference
+        collector: EmbeddingCollector instance for capturing query embeddings
+        config: Configuration for inference parameters (uses defaults if None)
+        hierarchy: Optional hierarchy tree for diversity checking
+        labels: Optional class labels for diversity checking
+        
+    Returns:
+        List[Dict[str, Any]]: Results with embeddings for each processed image
+        
+    Raises:
+        RuntimeError: If hook registration fails
+    """
+    # Validate inputs and use default config if needed
+    config = config or VisualizationConfig()
     results_with_embeddings = []
     
-    # Register hooks
-    collector.register_hooks(model)
+    # Register hooks with proper error handling
+    if not collector.register_hooks(model):
+        raise RuntimeError("Failed to register hooks for embedding collection")
     
     try:
+        # Create batch processor with configuration
+        processor = BatchProcessor(config, hierarchy, labels)
+        
+        # Process dataset in batches
+        results_with_embeddings = processor.process_dataset(model, dataset, collector)
+        
+        print(f"Successfully collected {len(results_with_embeddings)} results")
+        
+    except Exception as e:
+        print(f"Error during inference processing: {e}")
+        traceback.print_exc()
+        
+    finally:
+        # Critical: Always remove hooks to prevent memory leaks
+        try:
+            collector.remove_hooks()
+        except Exception as cleanup_error:
+            print(f"Warning: Error during hook cleanup: {cleanup_error}")
+    
+    return results_with_embeddings
+
+
+class BatchProcessor:
+    """
+    Handles batch processing of images for inference with diversity checking.
+    
+    This class manages the batch-wise processing of dataset images, monitors
+    diversity across hierarchical fallback levels, and implements early stopping
+    criteria for efficient data collection.
+    
+    Attributes:
+        config (VisualizationConfig): Configuration parameters for processing
+        hierarchy (Optional[HierarchyTree]): Hierarchy tree for diversity checking
+        labels (Optional[List[str]]): Class labels for diversity analysis
+        diversity_checker (Optional[DiversityChecker]): Checker for fallback level diversity
+    """
+    
+    def __init__(self, config: VisualizationConfig, 
+                 hierarchy: Optional[HierarchyTree] = None,
+                 labels: Optional[List[str]] = None):
+        """
+        Initialize the batch processor.
+        
+        Args:
+            config: Configuration for processing parameters
+            hierarchy: Optional hierarchy tree for diversity checking
+            labels: Optional class labels for diversity checking
+        """
+        self.config = config
+        self.hierarchy = hierarchy
+        self.labels = labels
+        self.diversity_checker = (
+            DiversityChecker(hierarchy, labels) 
+            if hierarchy and labels 
+            else None
+        )
+        
+    def process_dataset(self, model, dataset, collector: EmbeddingCollector) -> List[Dict[str, Any]]:
+        """
+        Process dataset in batches until diversity criteria are met.
+        
+        Args:
+            model: Detection model for inference
+            dataset: Dataset to process
+            collector: Embedding collector for query embeddings
+            
+        Returns:
+            List[Dict[str, Any]]: Results with embeddings from processed images
+        """
+        results_with_embeddings = []
         img_idx = 0
         batch_count = 0
         
-        while batch_count < max_batches and img_idx < len(dataset):
-            print(f"Processing batch {batch_count + 1}, images {img_idx}-{min(img_idx + batch_size, len(dataset))}")
+        print(f"Starting dataset processing with config: "
+              f"target={self.config.target_examples}, "
+              f"batch_size={self.config.batch_size}, "
+              f"max_batches={self.config.max_batches}")
+        
+        while batch_count < self.config.max_batches and img_idx < len(dataset):
+            batch_end = min(img_idx + self.config.batch_size, len(dataset))
             
-            # Process batch
-            batch_end = min(img_idx + batch_size, len(dataset))
-            for current_idx in range(img_idx, batch_end):
-                # Clear previous embeddings
-                collector.clear()
+            print(f"Processing batch {batch_count + 1}/{self.config.max_batches}, "
+                  f"images {img_idx}-{batch_end-1}")
+            
+            # Process current batch
+            batch_results = self._process_batch(model, dataset, collector, img_idx, batch_end)
+            results_with_embeddings.extend(batch_results)
+            
+            # Check stopping criteria
+            if self._should_stop_processing(results_with_embeddings, batch_count):
+                break
                 
-                # Get image info
-                img_info = dataset.get_data_info(current_idx)
-                img_path = img_info['img_path']
-                
-                # Run inference - this will trigger our hooks
-                with torch.no_grad():
-                    result = inference_detector(model, img_path)
-                    
-                # Extract detection info from DetDataSample
-                if hasattr(result, 'pred_instances'):
-                    pred_instances = result.pred_instances
-                    num_detections = len(pred_instances.bboxes)
-                    
-                    # Check if we have bbox_index (should be present from EmbeddingDINOHead)
-                    if hasattr(pred_instances, 'bbox_index'):
-                        bbox_index = pred_instances.bbox_index
-                        # print(f"Found bbox_index with {len(bbox_index)} indices: {bbox_index[:10].tolist() if len(bbox_index) > 10 else bbox_index.tolist()}")
-                        
-                        # Get corresponding query embeddings using bbox_index
-                        query_embeddings = collector.get_embeddings_for_detections(bbox_index)
-                        
-                        if query_embeddings is not None:
-                            # Add embeddings to the result
-                            pred_instances.query_embeddings = torch.from_numpy(query_embeddings)
-                        else:
-                            print("Warning: Could not get query embeddings using bbox_index")
-                    else:
-                        print("Warning: bbox_index not found in pred_instances - falling back to first N embeddings")
-                        # Fallback to old method
-                        query_embeddings = collector.get_embeddings_for_detections_fallback(num_detections)
-                        if query_embeddings is not None:
-                            pred_instances.query_embeddings = torch.from_numpy(query_embeddings)
-                    
-                    results_with_embeddings.append({
-                        'image_idx': current_idx,
-                        'image_path': img_path,
-                        'result': result,
-                        'gt_instances': img_info['instances']
-                    })
-            
-            # Check for sufficient diversity across all 6 fallback levels
-            if len(results_with_embeddings) >= target_examples * 3:  # Start checking after reasonable amount
-                # If we have hierarchical information, do proper diversity check
-                if hierarchy is not None and labels is not None:
-                    if check_fallback_diversity(results_with_embeddings, min_score, hierarchy, labels, iou_threshold):
-                        print(f"Found sufficient diversity across all 6 fallback levels after {len(results_with_embeddings)} results")
-                        break
-                else:
-                    # Fallback to simple high-confidence detection count
-                    high_conf_detections = 0
-                    for result_data in results_with_embeddings:
-                        result = result_data['result']
-                        if hasattr(result, 'pred_instances'):
-                            scores = result.pred_instances.scores
-                            high_conf_detections += len([s for s in scores if s >= min_score])
-                    
-                    # If we have at least 200 high-confidence detections, likely enough diversity
-                    if high_conf_detections >= 200:
-                        print(f"Found sufficient diversity after {len(results_with_embeddings)} results")
-                        break
-            
             img_idx = batch_end
             batch_count += 1
             
-            if batch_count % 3 == 0:  # Progress update every 3 batches
-                print(f"Processed {len(results_with_embeddings)} results so far...")
+            # Progress reporting
+            if batch_count % 3 == 0:
+                self._report_progress(results_with_embeddings, batch_count)
                 
-    finally:
-        # Always remove hooks
-        collector.remove_hooks()
+        print(f"Batch processing completed. Total results: {len(results_with_embeddings)}")
+        return results_with_embeddings
     
-    print(f"Collected {len(results_with_embeddings)} total results from {img_idx} images")
-    return results_with_embeddings
-
-def check_fallback_diversity(results_with_embeddings, min_score: float, hierarchy: HierarchyTree, labels: List[str], iou_threshold: float = 0.5) -> bool:
-    """Check if we have enough diversity across all 6 fallback levels."""
-    level_counts = [0] * 6
-    
-    for result_data in results_with_embeddings:
-        result = result_data['result']
-        gt_instances = result_data['gt_instances']
+    def _process_batch(self, model, dataset, collector: EmbeddingCollector, 
+                      start_idx: int, end_idx: int) -> List[Dict[str, Any]]:
+        """
+        Process a single batch of images with robust error handling.
         
-        pred_instances = result.pred_instances
-        pred_scores = pred_instances.scores.cpu().numpy()
-        pred_labels = pred_instances.labels.cpu().numpy()
-        pred_bboxes = pred_instances.bboxes.cpu().numpy()
-        
-        # Check each high-confidence detection
-        for i, (bbox, score, pred_label) in enumerate(zip(pred_bboxes, pred_scores, pred_labels)):
-            if score < min_score:
-                continue
-                
-            # Find matching ground truth
-            gt_leaf = None
-            for gt_inst in gt_instances:
-                gt_bbox = gt_inst['bbox']
-                if bbox_iou(bbox, gt_bbox) > iou_threshold:
-                    if gt_inst['bbox_label'] < len(labels):
-                        gt_leaf = labels[gt_inst['bbox_label']]
-                    break
+        Args:
+            model: Detection model for inference
+            dataset: Dataset to process
+            collector: Embedding collector for query embeddings
+            start_idx: Starting image index (inclusive)
+            end_idx: Ending image index (exclusive)
             
-            if gt_leaf is None:
-                continue
+        Returns:
+            List[Dict[str, Any]]: Results from successfully processed images
+        """
+        batch_results = []
+        errors_count = 0
+        
+        for current_idx in range(start_idx, end_idx):
+            try:
+                result_data = self._process_single_image(model, dataset, collector, current_idx)
+                if result_data:
+                    batch_results.append(result_data)
+                    
+            except Exception as e:
+                errors_count += 1
+                print(f"Warning: Error processing image {current_idx}: {e}")
                 
-            # Get predicted class name
-            if pred_label < len(labels):
-                pred_node = labels[pred_label]
+                # Stop if too many consecutive errors
+                if errors_count > 5:
+                    print("Too many errors in batch, skipping remaining images")
+                    break
+                continue
+        
+        if batch_results:
+            print(f"  Successfully processed {len(batch_results)} images "
+                  f"({errors_count} errors)")
+                
+        return batch_results
+    
+    def _process_single_image(self, model, dataset, collector: EmbeddingCollector, 
+                            img_idx: int) -> Optional[Dict[str, Any]]:
+        """
+        Process a single image and extract embeddings with enhanced error handling.
+        
+        Args:
+            model: Detection model for inference
+            dataset: Dataset to process
+            collector: Embedding collector for query embeddings
+            img_idx: Index of image to process
+            
+        Returns:
+            Optional[Dict[str, Any]]: Result data if successful, None otherwise
+        """
+        # Clear previous embeddings
+        collector.clear()
+        
+        try:
+            # Get image information
+            img_info = dataset.get_data_info(img_idx)
+            img_path = img_info['img_path']
+            
+            # Run inference with gradient disabled for efficiency
+            with torch.no_grad():
+                result = inference_detector(model, img_path)
+                
+            # Validate result structure
+            if not hasattr(result, 'pred_instances'):
+                return None
+                
+            pred_instances = result.pred_instances
+            num_detections = len(pred_instances.bboxes)
+            
+            if num_detections == 0:
+                return None
+            
+            # Extract and attach query embeddings
+            query_embeddings = self._extract_query_embeddings(
+                collector, pred_instances, num_detections
+            )
+            
+            if query_embeddings is not None:
+                pred_instances.query_embeddings = torch.from_numpy(query_embeddings)
+            
+            return {
+                'image_idx': img_idx,
+                'image_path': img_path,
+                'result': result,
+                'gt_instances': img_info['instances']
+            }
+            
+        except Exception as e:
+            print(f"Error processing image {img_idx}: {e}")
+            return None
+    
+    def _extract_query_embeddings(self, collector: EmbeddingCollector, 
+                                 pred_instances, num_detections: int) -> Optional[np.ndarray]:
+        """
+        Extract query embeddings using bbox_index or fallback method.
+        
+        Args:
+            collector: Embedding collector with captured embeddings
+            pred_instances: Prediction instances from inference
+            num_detections: Number of detections found
+            
+        Returns:
+            Optional[np.ndarray]: Query embeddings if extraction successful
+        """
+        # Try primary method using bbox_index
+        if hasattr(pred_instances, 'bbox_index'):
+            bbox_index = pred_instances.bbox_index
+            query_embeddings = collector.get_embeddings_for_detections(bbox_index)
+            
+            if query_embeddings is not None:
+                return query_embeddings
             else:
-                continue
+                print("Warning: Could not extract embeddings using bbox_index")
+        else:
+            print("Warning: bbox_index not available, using fallback method")
+            
+        # Fallback to simple extraction method
+        return collector.get_embeddings_for_detections_fallback(num_detections)
+    
+    def _should_stop_processing(self, results_with_embeddings: List[Dict[str, Any]], 
+                               batch_count: int) -> bool:
+        """
+        Check if processing should stop based on diversity and count criteria.
+        
+        Args:
+            results_with_embeddings: Results collected so far
+            batch_count: Current batch number
+            
+        Returns:
+            bool: True if processing should stop
+        """
+        total_results = len(results_with_embeddings)
+        
+        # Don't check early stopping until minimum threshold
+        if total_results < self.config.diversity_check_threshold:
+            return False
+        
+        # Use sophisticated diversity checking if available
+        if self.diversity_checker is not None:
+            if self.diversity_checker.check_diversity(
+                results_with_embeddings, 
+                self.config.min_score, 
+                self.config.iou_threshold
+            ):
+                print(f"✓ Found sufficient diversity across all fallback levels "
+                      f"after {total_results} results")
+                return True
+        else:
+            # Fallback to simple high-confidence count check
+            high_conf_count = self._count_high_confidence_detections(results_with_embeddings)
+            if high_conf_count >= self.config.high_conf_threshold:
+                print(f"✓ Reached target high-confidence detections: "
+                      f"{high_conf_count}/{self.config.high_conf_threshold} "
+                      f"after {total_results} results")
+                return True
                 
-            # Determine fallback level and count it
-            fallback_level = determine_fallback_level(gt_leaf, pred_node, hierarchy)
-            level_counts[fallback_level] += 1
+        return False
     
-    # Check if we have at least 2 examples for each of the 6 levels
-    min_per_level = 2
-    all_levels_covered = all(count >= min_per_level for count in level_counts)
+    def _count_high_confidence_detections(self, results_with_embeddings: List[Dict[str, Any]]) -> int:
+        """
+        Count high-confidence detections across all results.
+        
+        Args:
+            results_with_embeddings: Results from inference
+            
+        Returns:
+            int: Number of high-confidence detections
+        """
+        high_conf_count = 0
+        
+        for result_data in results_with_embeddings:
+            result = result_data.get('result')
+            if result and hasattr(result, 'pred_instances'):
+                scores = result.pred_instances.scores
+                high_conf_count += len([s for s in scores if s >= self.config.min_score])
+                
+        return high_conf_count
     
-    level_names = ['Leaf', 'Parent', 'Grandparent', 'Sibling', 'Cousin', 'Off-branch']
-    covered_levels = sum(1 for count in level_counts if count >= min_per_level)
+    def _report_progress(self, results_with_embeddings: List[Dict[str, Any]], 
+                        batch_count: int) -> None:
+        """
+        Report processing progress with statistics.
+        
+        Args:
+            results_with_embeddings: Results collected so far
+            batch_count: Current batch number
+        """
+        total_results = len(results_with_embeddings)
+        high_conf = self._count_high_confidence_detections(results_with_embeddings)
+        
+        print(f"Progress update - Batch {batch_count}: "
+              f"{total_results} total results, "
+              f"{high_conf} high-confidence detections")
+        
+        # Show diversity progress if checker available
+        if self.diversity_checker and total_results >= 20:
+            print("  Diversity status being checked...")
+            self.diversity_checker.check_diversity(
+                results_with_embeddings, 
+                self.config.min_score, 
+                self.config.iou_threshold
+            )
+
+
+class DiversityChecker:
+    """
+    Checks diversity of fallback levels across detection results.
     
-    print(f"Fallback level coverage: {covered_levels}/6 levels with {min_per_level}+ examples")
-    for i, (name, count) in enumerate(zip(level_names, level_counts)):
-        if count > 0:
-            print(f"  {name}: {count} examples")
+    This class analyzes detection results to ensure adequate representation
+    across all 6 hierarchical fallback levels for comprehensive visualization.
+    It provides sophisticated diversity metrics and early stopping criteria.
     
-    return all_levels_covered
+    Attributes:
+        hierarchy (HierarchyTree): Hierarchy tree for relationship analysis
+        labels (List[str]): Class labels for mapping predictions
+        level_names (List[str]): Human-readable names for fallback levels
+    """
+    
+    def __init__(self, hierarchy: HierarchyTree, labels: List[str]):
+        """
+        Initialize the diversity checker.
+        
+        Args:
+            hierarchy: Hierarchy tree containing class relationships
+            labels: List of class labels for prediction mapping
+        """
+        self.hierarchy = hierarchy
+        self.labels = labels
+        self.level_names = [
+            'Leaf', 'Parent', 'Grandparent', 
+            'Sibling', 'Cousin', 'Off-branch'
+        ]
+        
+    def check_diversity(self, results_with_embeddings: List[Dict[str, Any]], 
+                       min_score: float, iou_threshold: float, 
+                       min_per_level: int = 2) -> bool:
+        """
+        Check if we have sufficient diversity across all 6 fallback levels.
+        
+        Analyzes detection results to determine if there's adequate representation
+        across the hierarchical prediction spectrum for meaningful visualization.
+        
+        Args:
+            results_with_embeddings: Results from inference with embeddings
+            min_score: Minimum confidence score for including detections
+            iou_threshold: IoU threshold for matching predictions to ground truth
+            min_per_level: Minimum examples required per fallback level
+            
+        Returns:
+            bool: True if all levels have sufficient examples, False otherwise
+        """
+        try:
+            level_counts = self._count_fallback_levels(
+                results_with_embeddings, min_score, iou_threshold
+            )
+            
+            # Analyze coverage
+            sufficient_levels = sum(1 for count in level_counts if count >= min_per_level)
+            all_levels_covered = sufficient_levels == 6
+            
+            # Report detailed status
+            print(f"Fallback level diversity: {sufficient_levels}/6 levels "
+                  f"with {min_per_level}+ examples")
+            
+            for name, count in zip(self.level_names, level_counts):
+                status = "✓" if count >= min_per_level else "✗"
+                if count > 0:
+                    print(f"  {status} {name}: {count} examples")
+                    
+            return all_levels_covered
+            
+        except Exception as e:
+            print(f"Error checking diversity: {e}")
+            return False
+    
+    def _count_fallback_levels(self, results_with_embeddings: List[Dict[str, Any]], 
+                              min_score: float, iou_threshold: float) -> List[int]:
+        """
+        Count examples for each fallback level with robust error handling.
+        
+        Processes detection results to categorize predictions into hierarchical
+        fallback levels based on relationship to ground truth.
+        
+        Args:
+            results_with_embeddings: Results from inference
+            min_score: Minimum confidence score for including detections  
+            iou_threshold: IoU threshold for matching to ground truth
+            
+        Returns:
+            List[int]: Count of examples for each of the 6 fallback levels
+        """
+        level_counts = [0] * 6
+        processed_count = 0
+        error_count = 0
+        
+        for result_data in results_with_embeddings:
+            try:
+                result = result_data.get('result')
+                gt_instances = result_data.get('gt_instances', [])
+                
+                if not result or not hasattr(result, 'pred_instances'):
+                    continue
+                    
+                pred_instances = result.pred_instances
+                
+                # Extract prediction data safely
+                pred_scores = pred_instances.scores.cpu().numpy()
+                pred_labels = pred_instances.labels.cpu().numpy()
+                pred_bboxes = pred_instances.bboxes.cpu().numpy()
+                
+                # Process high-confidence detections
+                for bbox, score, pred_label in zip(pred_bboxes, pred_scores, pred_labels):
+                    if score < min_score:
+                        continue
+                    
+                    # Determine fallback level for this detection
+                    fallback_level = self._get_fallback_level_for_detection(
+                        bbox, pred_label, gt_instances, iou_threshold
+                    )
+                    
+                    if fallback_level is not None and 0 <= fallback_level < 6:
+                        level_counts[fallback_level] += 1
+                        
+                processed_count += 1
+                        
+            except Exception as e:
+                error_count += 1
+                if error_count <= 3:  # Only show first few errors
+                    print(f"Warning: Error processing result for diversity: {e}")
+                continue
+        
+        if error_count > 3:
+            print(f"Warning: {error_count} total errors during diversity checking")
+            
+        return level_counts
+    
+    def _get_fallback_level_for_detection(self, bbox: np.ndarray, pred_label: int,
+                                        gt_instances: List[Dict], iou_threshold: float) -> Optional[int]:
+        """
+        Get fallback level for a single detection with robust matching.
+        
+        Matches detection to ground truth and determines hierarchical relationship
+        between predicted and actual classes.
+        
+        Args:
+            bbox: Predicted bounding box [x1, y1, x2, y2]
+            pred_label: Predicted class index
+            gt_instances: Ground truth instances for the image
+            iou_threshold: IoU threshold for matching
+            
+        Returns:
+            Optional[int]: Fallback level (0-5) if valid match found, None otherwise
+        """
+        # Find best matching ground truth
+        gt_leaf = None
+        best_iou = 0.0
+        
+        for gt_inst in gt_instances:
+            try:
+                gt_bbox = gt_inst['bbox']
+                iou = bbox_iou(bbox, gt_bbox)
+                
+                if iou > iou_threshold and iou > best_iou:
+                    gt_label = gt_inst['bbox_label']
+                    if 0 <= gt_label < len(self.labels):
+                        gt_leaf = self.labels[gt_label]
+                        best_iou = iou
+                        
+            except (KeyError, IndexError, TypeError) as e:
+                continue
+        
+        if gt_leaf is None:
+            return None
+            
+        # Validate predicted class
+        if not (0 <= pred_label < len(self.labels)):
+            return None
+            
+        pred_node = self.labels[pred_label]
+        
+        # Determine hierarchical relationship
+        try:
+            return determine_fallback_level(gt_leaf, pred_node, self.hierarchy)
+        except Exception as e:
+            print(f"Error determining fallback level for {gt_leaf} -> {pred_node}: {e}")
+            return None
+
+
+def bbox_iou(box1: np.ndarray, box2: np.ndarray) -> float:
+    """
+    Calculate IoU (Intersection over Union) between two bounding boxes.
+    
+    Args:
+        box1: First bounding box [x1, y1, x2, y2]
+        box2: Second bounding box [x1, y1, x2, y2]
+        
+    Returns:
+        float: IoU value between 0 and 1
+    """
+    # Calculate intersection coordinates
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    # Check if there's no intersection
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    
+    # Calculate areas
+    intersection = (x2 - x1) * (y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0.0
 
 
 # -----------------------------------------------------------------------------
@@ -423,288 +1315,438 @@ def determine_fallback_level(gt_leaf: str, pred_node: str, tree: HierarchyTree) 
     """
     Determine the fallback level based on hierarchical relationship.
     
+    This function analyzes the relationship between ground truth and predicted classes
+    to classify the prediction into one of 6 hierarchical levels:
+    
     Args:
         gt_leaf: Ground truth leaf class name
-        pred_node: Predicted class name
-        tree: Hierarchy tree
+        pred_node: Predicted class name  
+        tree: Hierarchy tree containing class relationships
         
     Returns:
-        int: Fallback level (0=leaf, 1=parent, 2=grandparent, 3=sibling, 4=cousin, 5=off-branch)
+        int: Fallback level classification:
+            0 = Exact leaf match (perfect prediction)
+            1 = Parent match (one level up)
+            2 = Grandparent match (two levels up)
+            3 = Sibling match (same parent)
+            4 = Cousin match (same grandparent)
+            5 = Off-branch (no hierarchical relationship)
     """
+    # Early exit for missing classes
     if gt_leaf not in tree.class_to_node or pred_node not in tree.class_to_node:
         return 5  # off-branch
     
-    gt_node = tree.class_to_node[gt_leaf]
-    
-    # 0: Exact leaf match
+    # Exact match check
     if gt_leaf == pred_node:
         return 0
     
-    # 1: Parent match
+    gt_node = tree.class_to_node[gt_leaf]
+    
+    # Check parent relationship
     if gt_node.parent and gt_node.parent.name == pred_node:
         return 1
     
-    # 2: Grandparent match
+    # Check grandparent relationship
     grandparent = tree.get_grandparent(gt_leaf)
     if grandparent and grandparent == pred_node:
         return 2
     
-    # 3: Sibling match
+    # Check sibling relationship (same parent)
     siblings = tree.get_siblings(gt_leaf)
     if pred_node in siblings:
         return 3
     
-    # 4: Cousin match
+    # Check cousin relationship (same grandparent)
     cousins = tree.get_cousins(gt_leaf)
     if pred_node in cousins:
         return 4
     
-    # 5: Off-branch (no hierarchical relationship)
+    # No hierarchical relationship found
     return 5
 
 
 def get_fallback_visual_encoding(level: int) -> Dict[str, Any]:
     """
-    Get visual encoding for fallback level.
-    Uses colors consistent with hierarchical_prediction_distribution.py
+    Get visual encoding for fallback level with color-blind friendly palette.
     
+    Uses a carefully selected color scheme that maintains consistency with
+    hierarchical_prediction_distribution.py while being accessible to users
+    with color vision deficiencies.
+    
+    Args:
+        level: Hierarchical fallback level (0-5)
+        
     Returns:
-        dict: Contains 'color', 'linestyle', 'linewidth' for border
+        Dict[str, Any]: Visual encoding containing:
+            - 'color': Hex color code for border/marker
+            - 'linestyle': Line style for plotting
+            - 'linewidth': Line width for emphasis
     """
-    # Color scheme from hierarchical_prediction_distribution.py for consistency
-    encodings = {
-        0: {'color': '#2E8B57', 'linestyle': '-', 'linewidth': 4},     # tp (leaf correct) - SeaGreen
-        1: {'color': '#66CDAA', 'linestyle': '-', 'linewidth': 4},     # parent_tp - MediumAquamarine
-        2: {'color': '#90EE90', 'linestyle': '-', 'linewidth': 4},     # grandparent_tp - LightGreen
-        3: {'color': '#87CEEB', 'linestyle': '-', 'linewidth': 4},     # sibling_tp - SkyBlue
-        4: {'color': '#DDA0DD', 'linestyle': '-', 'linewidth': 4},     # cousin_tp - Plum
-        5: {'color': '#DC143C', 'linestyle': '-', 'linewidth': 4},     # other_class - Crimson (off-branch)
+    # Color-blind friendly palette optimized for hierarchical levels
+    # Progression: Dark green (best) -> Light green -> Blue -> Purple -> Orange -> Red (worst)
+    visual_encodings = {
+        0: {  # Exact match - Dark green (excellent)
+            'color': '#1B5E20',      # Dark green
+            'linestyle': '-', 
+            'linewidth': 4
+        },
+        1: {  # Parent match - Medium green (very good)
+            'color': '#388E3C',      # Medium green  
+            'linestyle': '-',
+            'linewidth': 4
+        },
+        2: {  # Grandparent match - Light green (good)
+            'color': '#66BB6A',      # Light green
+            'linestyle': '-',
+            'linewidth': 4
+        },
+        3: {  # Sibling match - Blue (acceptable)
+            'color': '#1976D2',      # Blue
+            'linestyle': '-',
+            'linewidth': 4
+        },
+        4: {  # Cousin match - Purple (poor)
+            'color': '#7B1FA2',      # Purple
+            'linestyle': '-',
+            'linewidth': 4
+        },
+        5: {  # Off-branch - Red (worst)
+            'color': '#D32F2F',      # Red
+            'linestyle': '-',
+            'linewidth': 4
+        }
     }
-    return encodings.get(level, encodings[5])
+    
+    # Return encoding for level, defaulting to off-branch for invalid levels
+    return visual_encodings.get(level, visual_encodings[5])
 
 
-def validate_nearest_neighbor_predictions_with_model(model, query_embeddings: np.ndarray, prototype_embeddings: np.ndarray, 
-                                                       prediction_labels: np.ndarray, space_name: str = "embedding") -> float:
+def _select_balanced_subset(
+    source_examples: List[Dict[str, Any]], 
+    num_to_select: int
+) -> List[Dict[str, Any]]:
     """
-    Validate that the nearest neighbor in embedding space matches the actual model prediction.
-    Uses the model's actual distance calculation with temperature scaling and bias.
+    Selects a subset of examples, attempting to maintain balance across fallback levels.
+    """
+    if not source_examples or num_to_select <= 0:
+        return []
+
+    # Ensure all source examples have a valid fallback_level
+    valid_source_examples = [ex for ex in source_examples if 'fallback_level' in ex and 0 <= ex['fallback_level'] < 6]
+    if not valid_source_examples:
+        # If no valid examples, return a simple slice of the original if desperate, or empty
+        return source_examples[:num_to_select] if source_examples else []
+
+    examples_by_level = {level: [] for level in range(6)}
+    for ex in valid_source_examples:
+        examples_by_level[ex['fallback_level']].append(ex)
+
+    # Sort examples within each level by confidence (descending) if available
+    for level in range(6):
+        if examples_by_level[level]:
+            examples_by_level[level].sort(key=lambda x: x.get('confidence', 0.0), reverse=True)
+
+    selected_examples: List[Dict[str, Any]] = []
+    # Keeps track of how many we've taken from each level's sorted list
+    num_taken_from_level = [0] * 6 
+
+    # First pass: Try to get a proportional number from each level
+    # Target at least 1 per level if num_to_select allows, or num_to_select // 6
+    target_per_level_first_pass = max(1, num_to_select // 6 if num_to_select >= 6 else 1)
+
+    for level in range(6):
+        if len(selected_examples) >= num_to_select:
+            break 
+
+        available_count_in_level = len(examples_by_level[level])
+        
+        # How many to attempt to take from this level in this pass
+        num_to_attempt = min(target_per_level_first_pass, available_count_in_level - num_taken_from_level[level])
+        
+        # How many can we actually take given remaining overall slots
+        num_can_actually_take = min(num_to_attempt, num_to_select - len(selected_examples))
+
+        if num_can_actually_take > 0:
+            start_index = num_taken_from_level[level]
+            selected_examples.extend(examples_by_level[level][start_index : start_index + num_can_actually_take])
+            num_taken_from_level[level] += num_can_actually_take
+            
+    # Second pass: Fill remaining slots by cycling through levels that still have examples
+    # This loop continues as long as we need more examples and can still add them.
+    while len(selected_examples) < num_to_select:
+        added_in_this_cycle = False
+        for level in range(6): # Cycle through levels
+            if len(selected_examples) >= num_to_select:
+                break # Stop if we've filled up
+
+            # Check if this level still has examples we haven't taken
+            if num_taken_from_level[level] < len(examples_by_level[level]):
+                start_index = num_taken_from_level[level]
+                selected_examples.append(examples_by_level[level][start_index])
+                num_taken_from_level[level] += 1
+                added_in_this_cycle = True
+                if len(selected_examples) >= num_to_select:
+                    break 
+        
+        if not added_in_this_cycle: 
+            # If a full cycle through levels adds no new examples, we're done.
+            break
+            
+    return selected_examples # The loops ensure we don't exceed num_to_select
+
+
+# =============================================================================
+# VALIDATION FUNCTIONS
+# =============================================================================
+
+def validate_nearest_neighbor_accuracy(query_embeddings: np.ndarray, 
+                                     prototype_embeddings: np.ndarray,
+                                     prediction_labels: np.ndarray, 
+                                     class_labels: List[str], # ADDED: list of prototype class names
+                                     space_name: str = "embedding",
+                                     model: Optional[Any] = None,
+                                     sample_size: int = 10) -> ValidationResult:
+    """
+    Validate that nearest neighbor in embedding space matches actual model predictions.
+    
+    This function supports both simple Euclidean distance and model-aware validation
+    that includes temperature scaling and geometric bias. It returns a structured
+    ValidationResult for consistent reporting.
     
     Args:
-        model: The trained model with classifier
-        query_embeddings: Query embeddings (N, D)
-        prototype_embeddings: Prototype embeddings (M, D) 
-        prediction_labels: Actual prediction labels for each query (N,)
+        query_embeddings: Query embeddings (N, D)  
+        prototype_embeddings: Prototype embeddings (M, D)
+        prediction_labels: Actual prediction labels (indices) for each query (N,)
+        class_labels: List of class names corresponding to prototype_embeddings indices (M,)
         space_name: Name of the space for logging (e.g., "original", "PCA", "2D")
+        model: Optional model for model-aware validation with temperature/bias
+        sample_size: Number of samples to validate (default: 10)
         
     Returns:
-        float: Percentage of queries where nearest neighbor matches prediction
+        ValidationResult: Structured validation results with summary method
     """
-    if len(query_embeddings) == 0 or len(prediction_labels) == 0:
-        return 0.0
+    # Input validation
+    if len(query_embeddings) == 0 or len(prediction_labels) == 0 or len(prototype_embeddings) == 0:
+        return ValidationResult(
+            space_name=space_name,
+            sample_size=0,
+            matches=0,
+            match_rate=0.0,
+            detailed_results=[]
+        )
+    if len(prototype_embeddings) != len(class_labels):
+        print(f"Warning (validate_nearest_neighbor_accuracy): Mismatch between prototype_embeddings ({len(prototype_embeddings)}) and class_labels ({len(class_labels)}). Names might be incorrect.")
+        # Proceed, but names might be unreliable or cause errors if indices are out of bounds.
     
-    # Get the target classifier (using same logic as immediate validation)
-    last_branch_idx = get_last_classification_branch_index(model)
-    is_two_stage = getattr(model, 'as_two_stage', False)
-    if is_two_stage:
-        target_classifier = model.bbox_head.cls_branches[last_branch_idx - 1]  # Second-to-last decoder layer
-    else:
-        target_classifier = model.bbox_head.cls_branches[last_branch_idx]
-    
+    # Determine validation method and prepare
+    use_model_aware = model is not None
+    actual_sample_size = min(sample_size, len(query_embeddings), len(prediction_labels))
     matches = 0
-    sample_size = min(10, len(query_embeddings))
     detailed_results = []
     
-    with torch.no_grad():
-        query_tensor = torch.from_numpy(query_embeddings).float()
-        prototype_tensor = torch.from_numpy(prototype_embeddings).float()
-        
-        for i in range(sample_size):
-            # Get single query embedding
-            query_emb = query_tensor[i:i+1]  # Shape: (1, D)
-            
-            # Calculate distances using the model's method
-            distances = torch.cdist(query_emb, prototype_tensor, p=2).squeeze(0)  # Shape: (num_prototypes,)
-            
-            # Apply temperature scaling if present
-            if target_classifier.use_temperature and target_classifier.logit_scale is not None:
-                temp_scale = target_classifier.logit_scale.exp().clamp(max=100)
-                distances = distances * temp_scale
-            
-            # Convert distances to logits (negative distance)
-            logits = -distances
-            
-            # Apply geometric bias if present
-            if target_classifier.geometric_bias is not None:
-                logits = logits + target_classifier.geometric_bias
-            
-            # Find the class with minimum distance (maximum logit)
-            nn_idx = torch.argmax(logits).item()
-            
-            # Check if nearest neighbor matches actual prediction
-            pred_label = prediction_labels[i]
-            nn_matches_pred = (nn_idx == pred_label)
-            
-            if nn_matches_pred:
-                matches += 1
-                
-            # Ensure pred_label is an integer for indexing
-            try:
-                pred_label_int = int(pred_label)
-                min_distance = distances[pred_label_int].item()
-            except (ValueError, IndexError) as e:
-                print(f"Warning: Cannot get distance for pred_label {pred_label}: {e}")
-                min_distance = float('nan')
-                
-            detailed_results.append({
-                'query_idx': i,
-                'prediction': pred_label,
-                'nearest_neighbor': nn_idx,
-                'matches': nn_matches_pred,
-                'min_distance': min_distance
-            })
+    # Get target classifier for model-aware validation
+    target_classifier = None
+    if use_model_aware:
+        try:
+            target_classifier = get_target_classifier(model)
+        except Exception as e:
+            print(f"Warning: Failed to get target classifier, falling back to simple validation: {e}")
+            use_model_aware = False
     
-    match_rate = matches / sample_size
-    print(f"\n{space_name} space validation (MODEL-AWARE): Nearest neighbor = Prediction")
-    print(f"Prediction accuracy via nearest neighbor: {matches}/{sample_size} ({match_rate:.1%})")
+    # Perform validation using unified function
+    matches, detailed_results = _validate_embeddings(
+        query_embeddings, prototype_embeddings, prediction_labels,
+        actual_sample_size, class_labels, # Pass class_labels here
+        target_classifier if use_model_aware else None
+    )
+    validation_type = "MODEL-AWARE" if use_model_aware and target_classifier is not None else "EUCLIDEAN"
     
-    # Show detailed breakdown for small samples
-    if sample_size <= 5:
-        print("Detailed breakdown:")
-        for result in detailed_results:
-            status = "✅" if result['matches'] else "❌"
-            print(f"  Query {result['query_idx']}: Pred={result['prediction']}, NN={result['nearest_neighbor']} {status}")
+    # Create result
+    match_rate = matches / actual_sample_size if actual_sample_size > 0 else 0.0
+    result = ValidationResult(
+        space_name=f"{space_name} ({validation_type})",
+        sample_size=actual_sample_size,
+        matches=matches,
+        match_rate=match_rate,
+        detailed_results=detailed_results
+    )
     
-    if match_rate >= 0.9:
-        print("✅ Excellent: Nearest neighbor matches prediction (embedding-based classification working)")
-    elif match_rate >= 0.7:
-        print("⚠️ Good: Most nearest neighbors match predictions")
-    elif match_rate >= 0.5:
-        print("⚠️ Moderate: Some nearest neighbors match predictions")
-    else:
-        print("❌ Poor: Nearest neighbors often don't match predictions")
-        print("💡 This suggests the embedding space may not be well-aligned for distance-based classification")
-    
-    return match_rate
+    return result
 
 
-def validate_nearest_neighbor_predictions(query_embeddings: np.ndarray, prototype_embeddings: np.ndarray, 
-                                         prediction_labels: np.ndarray, space_name: str = "embedding") -> float:
+def _validate_embeddings(query_embeddings: np.ndarray,
+                        prototype_embeddings: np.ndarray,
+                        prediction_labels: np.ndarray, # These are the model's actual prediction (label indices) for queries
+                        sample_size: int,
+                        class_labels: List[str], # List of names for prototype classes
+                        target_classifier: Any = None) -> Tuple[int, List[Dict[str, Any]]]:
     """
-    Validate that the nearest neighbor in embedding space matches the actual model prediction.
-    
-    Args:
-        query_embeddings: Query embeddings (N, D)
-        prototype_embeddings: Prototype embeddings (M, D) 
-        prediction_labels: Actual prediction labels for each query (N,)
-        space_name: Name of the space for logging (e.g., "original", "PCA", "2D")
-        
-    Returns:
-        float: Percentage of queries where nearest neighbor matches prediction
+    Unified validation function with automatic fallback.
+    Tries model-aware validation first, falls back to simple Euclidean if needed.
     """
-    if len(query_embeddings) == 0 or len(prediction_labels) == 0:
-        return 0.0
-    
     matches = 0
-    sample_size = min(10, len(query_embeddings))
     detailed_results = []
     
+    # Try model-aware validation first if classifier is available
+    if target_classifier is not None:
+        try:
+            with torch.no_grad():
+                query_tensor = torch.from_numpy(query_embeddings[:sample_size]).float()
+                # Ensure prototype_tensor is created correctly based on the full prototype_embeddings
+                prototype_tensor = torch.from_numpy(prototype_embeddings).float() 
+                
+                for i in range(sample_size):
+                    query_emb = query_tensor[i:i+1]
+                    
+                    # Calculate distances using model's method
+                    distances = torch.cdist(query_emb, prototype_tensor, p=2).squeeze(0)
+                    
+                    # Apply temperature scaling if present
+                    if (hasattr(target_classifier, 'use_temperature') and 
+                        target_classifier.use_temperature and 
+                        hasattr(target_classifier, 'logit_scale') and 
+                        target_classifier.logit_scale is not None):
+                        temp_scale = target_classifier.logit_scale.exp().clamp(max=100)
+                        distances = distances * temp_scale
+                    
+                    # Convert to logits and find nearest neighbor
+                    logits = -distances # Higher score (lower distance) is better
+                    if (hasattr(target_classifier, 'geometric_bias') and 
+                        target_classifier.geometric_bias is not None and
+                        target_classifier.geometric_bias.shape == logits.shape): # Check shape
+                        logits = logits + target_classifier.geometric_bias
+                    
+                    nn_idx = torch.argmax(logits).item() # Index of the NN prototype
+                    actual_pred_label_idx = int(prediction_labels[i]) # Model's actual prediction for this query
+                    nn_matches_pred = (nn_idx == actual_pred_label_idx)
+                    
+                    if nn_matches_pred:
+                        matches += 1
+                    
+                    result_detail = {
+                        'query_idx': i,
+                        'prediction': actual_pred_label_idx, # Model's prediction index
+                        'nearest_neighbor': nn_idx,          # NN prototype index in this space
+                        'matches': nn_matches_pred,
+                        'distance': distances[nn_idx].item() # Distance to the NN prototype
+                    }
+                    if not nn_matches_pred:
+                        if 0 <= actual_pred_label_idx < len(class_labels):
+                            result_detail['predicted_class_name'] = class_labels[actual_pred_label_idx]
+                        else:
+                            result_detail['predicted_class_name'] = f"UnknownLabelIdx({actual_pred_label_idx})"
+                        if 0 <= nn_idx < len(class_labels):
+                            result_detail['nn_class_name'] = class_labels[nn_idx]
+                        else:
+                            result_detail['nn_class_name'] = f"UnknownLabelIdx({nn_idx})"
+                    detailed_results.append(result_detail)
+                    
+            return matches, detailed_results
+            
+        except Exception as e:
+            print(f"Model-aware validation failed, using Euclidean fallback: {e}")
+            # Fall through to Euclidean
+    
+    # Fallback to simple Euclidean distance validation
+    detailed_results.clear() # Clear any partial results from failed model-aware attempt
+    matches = 0 # Reset matches
+
     for i in range(sample_size):
-        # Find nearest neighbor in embedding space
         query = query_embeddings[i:i+1]
         distances = np.linalg.norm(prototype_embeddings - query, axis=1)
-        nn_idx = np.argmin(distances)
+        nn_idx = np.argmin(distances) # Index of the NN prototype
         
-        # Check if nearest neighbor matches actual prediction
-        pred_label = prediction_labels[i]
-        nn_matches_pred = (nn_idx == pred_label)
+        actual_pred_label_idx = int(prediction_labels[i]) # Model's actual prediction for this query
+        nn_matches_pred = (nn_idx == actual_pred_label_idx)
         
         if nn_matches_pred:
             matches += 1
-            
-        detailed_results.append({
+        
+        result_detail = {
             'query_idx': i,
-            'prediction': pred_label,
+            'prediction': actual_pred_label_idx,
             'nearest_neighbor': nn_idx,
             'matches': nn_matches_pred,
-            'distance': distances[nn_idx]
-        })
+            'distance': float(distances[nn_idx])
+        }
+        if not nn_matches_pred:
+            if 0 <= actual_pred_label_idx < len(class_labels):
+                result_detail['predicted_class_name'] = class_labels[actual_pred_label_idx]
+            else:
+                result_detail['predicted_class_name'] = f"UnknownLabelIdx({actual_pred_label_idx})"
+            if 0 <= nn_idx < len(class_labels):
+                result_detail['nn_class_name'] = class_labels[nn_idx]
+            else:
+                result_detail['nn_class_name'] = f"UnknownLabelIdx({nn_idx})"
+        detailed_results.append(result_detail)
     
-    match_rate = matches / sample_size
-    print(f"\n{space_name} space validation: Nearest neighbor = Prediction")
-    print(f"Prediction accuracy via nearest neighbor: {matches}/{sample_size} ({match_rate:.1%})")
-    
-    # Show detailed breakdown for small samples
-    if sample_size <= 5:
-        print("Detailed breakdown:")
-        for result in detailed_results:
-            status = "✅" if result['matches'] else "❌"
-            print(f"  Query {result['query_idx']}: Pred={result['prediction']}, NN={result['nearest_neighbor']} {status}")
-    
-    if match_rate >= 0.9:
-        print("✅ Excellent: Nearest neighbor matches prediction (embedding-based classification working)")
-    elif match_rate >= 0.7:
-        print("⚠️ Good: Most nearest neighbors match predictions")
-    elif match_rate >= 0.5:
-        print("⚠️ Moderate: Some nearest neighbors match predictions")
-    else:
-        print("❌ Poor: Nearest neighbors often don't match predictions")
-        print("💡 This suggests the embedding space may not be well-aligned for distance-based classification")
-    
-    return match_rate
+    return matches, detailed_results
 
 
-def collect_embeddings_and_labels_for_validation(results_with_embeddings, min_score: float = 0.3):
+def collect_validation_data(results_with_embeddings: List[Dict[str, Any]], 
+                           config: VisualizationConfig) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Extract query embeddings and corresponding prediction labels from inference results.
+    Extract query embeddings and prediction labels for validation.
     
     Args:
         results_with_embeddings: Results from run_inference_with_hooks
-        min_score: Minimum confidence score for detections to include
+        config: Configuration with validation parameters
         
     Returns:
-        tuple: (query_embeddings, prediction_labels) as numpy arrays
+        Tuple[np.ndarray, np.ndarray]: (query_embeddings, prediction_labels)
     """
     all_query_embeddings = []
     all_prediction_labels = []
     
     for result_data in results_with_embeddings:
-        result = result_data['result']
-        
-        if not hasattr(result, 'pred_instances'):
+        result = result_data.get('result')
+        if not result or not hasattr(result, 'pred_instances'):
             continue
             
         pred_instances = result.pred_instances
         
-        # Check if we have both embeddings and predictions
+        # Check for required data
         if not hasattr(pred_instances, 'query_embeddings'):
             continue
             
-        pred_scores = pred_instances.scores.cpu().numpy()
-        pred_labels = pred_instances.labels.cpu().numpy()
-        query_embeddings = pred_instances.query_embeddings.numpy()
-        
-        # Filter by confidence score
-        high_conf_mask = pred_scores >= min_score
-        if not np.any(high_conf_mask):
-            continue
+        try:
+            pred_scores = pred_instances.scores.cpu().numpy()
+            pred_labels = pred_instances.labels.cpu().numpy()
+            query_embeddings = pred_instances.query_embeddings.numpy()
             
-        # Collect high-confidence embeddings and labels
-        high_conf_embeddings = query_embeddings[high_conf_mask]
-        high_conf_labels = pred_labels[high_conf_mask]
-        
-        all_query_embeddings.append(high_conf_embeddings)
-        all_prediction_labels.append(high_conf_labels)
+            # Filter by confidence score
+            high_conf_mask = pred_scores >= config.min_confidence_score
+            if not np.any(high_conf_mask):
+                continue
+                
+            # Collect high-confidence data
+            high_conf_embeddings = query_embeddings[high_conf_mask]
+            high_conf_labels = pred_labels[high_conf_mask]
+            
+            all_query_embeddings.append(high_conf_embeddings)
+            all_prediction_labels.append(high_conf_labels)
+            
+        except Exception as e:
+            print(f"Warning: Error processing result data: {e}")
+            continue
     
+    # Combine results
     if not all_query_embeddings:
+        print("Warning: No validation data collected")
         return np.array([]), np.array([])
     
-    # Concatenate all embeddings and labels
-    combined_embeddings = np.vstack(all_query_embeddings)
-    combined_labels = np.concatenate(all_prediction_labels)
-    
-    print(f"Collected {len(combined_embeddings)} query embeddings with prediction labels for validation")
-    
-    return combined_embeddings, combined_labels
+    try:
+        combined_embeddings = np.vstack(all_query_embeddings)
+        combined_labels = np.concatenate(all_prediction_labels)
+        
+        print(f"Collected {len(combined_embeddings)} query embeddings "
+              f"(min_score >= {config.min_confidence_score}) for validation")
+        
+        return combined_embeddings, combined_labels
+        
+    except Exception as e:
+        print(f"Error combining validation data: {e}")
+        return np.array([]), np.array([])
 
 
 # -----------------------------------------------------------------------------
@@ -838,6 +1880,9 @@ def load_embeddings_and_umap(model_path: str, config_path: str, random_state: in
         if len(embeddings) != len(categories):
             print(f"Warning: Number of embeddings ({len(embeddings)}) != categories ({len(categories)})")
 
+        labels_from_ann = [cat["name"] for cat in categories] # These are usually leaf node names
+        hierarchy = HierarchyTree(ann["taxonomy"])
+
         # Prepare embeddings for UMAP fitting
         query_projections = None
         if query_embeddings is not None and len(query_embeddings) > 0:
@@ -890,17 +1935,18 @@ def load_embeddings_and_umap(model_path: str, config_path: str, random_state: in
         print("\n=== Pre-transformation Validation (Original Embedding Space) ===")
         if query_embeddings is not None and len(query_embeddings) > 0:
             if detection_examples is not None and len(detection_examples) > 0:
-                # Extract prediction labels (class indices) directly from detection examples
-                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples])
-                validation_queries = query_embeddings  # These should match the detection examples
-                
-                if len(validation_queries) == len(validation_pred_labels):
-                    # Validate that nearest neighbors match actual predictions in original space
-                    original_match_rate = validate_nearest_neighbor_predictions_with_model(
-                        model, validation_queries, embeddings, validation_pred_labels, 
-                        "Original embedding"
+                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples if 'pred_label' in ex])
+                # Ensure query_embeddings used for validation align with detection_examples
+                # This assumes query_embeddings were generated from these detection_examples
+                validation_queries = query_embeddings[:len(validation_pred_labels)] # Align lengths
+
+                if len(validation_queries) == len(validation_pred_labels) and len(validation_pred_labels) > 0:
+                    original_result = validate_nearest_neighbor_accuracy(
+                        validation_queries, embeddings, validation_pred_labels,
+                        labels_from_ann, # Pass class names for prototypes
+                        "Original", model=model, sample_size=min(10, len(validation_queries))
                     )
-                    print(f"Baseline validation complete: {original_match_rate:.1%} of queries have nearest neighbor = prediction")
+                    original_result.print_summary()
                 else:
                     print(f"⚠️  Mismatch: {len(validation_queries)} query embeddings vs {len(validation_pred_labels)} prediction labels")
                     print("    Cannot perform pre-transformation validation")
@@ -989,13 +2035,15 @@ def load_embeddings_and_umap(model_path: str, config_path: str, random_state: in
                         # Extract prediction labels (class indices) directly from detection examples
                         validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples])
                         
-                        if len(validation_pred_labels) == len(preprocessed_queries):
-                            # Note: For PCA validation, we use simple L2 distance since the model doesn't operate in PCA space
-                            pca_match_rate = validate_nearest_neighbor_predictions(
-                                preprocessed_queries, preprocessed_prototypes, validation_pred_labels, 
-                                "PCA embedding"
+                        aligned_preprocessed_queries = preprocessed_queries[:len(validation_pred_labels)]
+
+                        if len(validation_pred_labels) == len(aligned_preprocessed_queries) and len(validation_pred_labels) > 0:
+                            pca_result = validate_nearest_neighbor_accuracy(
+                                aligned_preprocessed_queries, preprocessed_prototypes, validation_pred_labels,
+                                labels_from_ann, # Pass class names for prototypes
+                                "PCA", model=None, sample_size=min(10, len(aligned_preprocessed_queries))
                             )
-                            print(f"PCA validation: {pca_match_rate:.1%} of queries have nearest neighbor = prediction")
+                            pca_result.print_summary()
                         else:
                             print("⚠️ Cannot validate PCA predictions: embedding/label count mismatch")
                     else:
@@ -1168,32 +2216,35 @@ def load_embeddings_and_umap(model_path: str, config_path: str, random_state: in
             
             # Additional validation with actual predictions if detection examples are available
             if detection_examples is not None and len(detection_examples) > 0:
-                # Extract prediction labels (class indices) directly from detection examples
-                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples])
-                
-                if len(validation_pred_labels) == len(query_2d):
+                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples if 'pred_label' in ex])
+                # Align query_2d with validation_pred_labels
+                aligned_query_2d = query_2d[:len(validation_pred_labels)]
+
+                if len(validation_pred_labels) == len(aligned_query_2d) and len(validation_pred_labels) > 0:
                     print("\nValidating 2D projection with actual predictions:")
-                    projection_2d_prototypes = combined_umap_2d[:len(embeddings)]
-                    projection_2d_queries = combined_umap_2d[len(embeddings):]
+                    projection_2d_prototypes = combined_umap_2d[:len(embeddings)] # These are the prototypes in 2D
+                    # projection_2d_queries = combined_umap_2d[len(embeddings):] # Already have aligned_query_2d
                     
-                    # Note: For 2D validation, we use simple L2 distance since the model doesn't operate in 2D space
-                    projection_match_rate = validate_nearest_neighbor_predictions(
-                        projection_2d_queries, projection_2d_prototypes, validation_pred_labels, 
-                        "2D projection"
+                    projection_result = validate_nearest_neighbor_accuracy(
+                        aligned_query_2d, projection_2d_prototypes, validation_pred_labels,
+                        labels_from_ann, # Pass class names for prototypes
+                        "2D projection", model=None, sample_size=min(10, len(aligned_query_2d))
                     )
-                    print(f"Final 2D validation: {projection_match_rate:.1%} of queries have nearest neighbor = prediction")
+                    projection_result.print_summary()
                     
-                    # Also validate the high-D preprocessed space if available
+                    # High-D preprocessed space validation (if PCA was applied)
                     if pca_transformer is not None:
-                        preprocessed_prototypes_2d = preprocessed_embeddings[:len(embeddings)]
-                        preprocessed_queries_2d = preprocessed_embeddings[len(embeddings):]
+                        preprocessed_prototypes_hd = preprocessed_embeddings[:len(embeddings)]
+                        # Align preprocessed_queries_hd with validation_pred_labels
+                        aligned_preprocessed_queries_hd = preprocessed_embeddings[len(embeddings):][:len(validation_pred_labels)]
                         
-                        # Note: For high-D validation, we use simple L2 distance since the model doesn't operate in PCA space
-                        high_d_match_rate = validate_nearest_neighbor_predictions(
-                            preprocessed_queries_2d, preprocessed_prototypes_2d, validation_pred_labels, 
-                            "High-D preprocessed"
-                        )
-                        print(f"High-D preprocessed validation: {high_d_match_rate:.1%} of queries have nearest neighbor = prediction")
+                        if len(aligned_preprocessed_queries_hd) == len(validation_pred_labels):
+                            high_d_result = validate_nearest_neighbor_accuracy(
+                                aligned_preprocessed_queries_hd, preprocessed_prototypes_hd, validation_pred_labels,
+                                labels_from_ann, # Pass class names for prototypes
+                                "High-D preprocessed", model=None, sample_size=min(10, len(aligned_preprocessed_queries_hd))
+                            )
+                            high_d_result.print_summary()
                 else:
                     print(f"⚠️ Cannot validate 2D predictions: {len(validation_pred_labels)} labels vs {len(query_2d)} queries")
             else:
@@ -1415,70 +2466,71 @@ def plot_prototype_scatter(ax: Axes,
                           marker_sizes: np.ndarray, 
                           fill_colors: List[Any], 
                           edge_colors: List[Any], 
-                          filtered_labels: List[str]):
-    """Plot UMAP scatter points with improved label readability."""
+                          filtered_labels: List[str],
+                          viz_manager: Optional['VisualizationManager'] = None):
+    """
+    Plot UMAP scatter points with publication-quality styling and improved readability.
+    Labels all nodes.
+    
+    Args:
+        ax: Matplotlib axes to plot on
+        filtered_coords: Coordinates for each prototype (N, 2)
+        marker_sizes: Marker sizes for each prototype (N,)
+        fill_colors: Fill colors for each prototype
+        edge_colors: Edge colors for each prototype  
+        filtered_labels: Label text for each prototype
+        viz_manager: Optional VisualizationManager for consistent styling
+    """
     if filtered_coords.size == 0 or marker_sizes.size == 0:
+        print("Warning: No data to plot in plot_prototype_scatter.")
         return
 
-    # Use larger markers for better visibility in publication
-    marker_sizes = marker_sizes * 1.3  # Increase marker sizes
+    base_scale = 1.4 if viz_manager else 1.3
+    adjusted_sizes = marker_sizes * base_scale
     
-    # Plot main scatter points
     ax.scatter(
         filtered_coords[:, 0], filtered_coords[:, 1],
-        s=marker_sizes,
+        s=adjusted_sizes,
         c=fill_colors,
         edgecolors=edge_colors,
-        linewidths=1.8,
-        alpha=0.9,      # More solid appearance
-        zorder=2
+        linewidths=2.2,
+        alpha=0.95,
+        zorder=6
     )
 
-    # Add labels with better placement and readability
     texts = []
-    for i, ((x, y), lbl) in enumerate(zip(filtered_coords, filtered_labels)):
-        current_marker_size = marker_sizes[i] if i < len(marker_sizes) else 20
-        
-        # Calculate font size based on marker size but with limits for readability
-        font_size = max(8, min(12, 11 - 0.04 * np.sqrt(current_marker_size)))
-        edge_color = edge_colors[i] if i < len(edge_colors) else 'black'
-
-        # Truncate very long labels
-        display_label = lbl
-        if len(lbl) > 15:
-            display_label = lbl[:12] + "..."
-
-        # Add simple text labels without background boxes
-        texts.append(ax.text(
-            x, y, display_label,
-            color=edge_color, 
-            fontsize=font_size, 
-            fontweight='bold',
-            ha="center", va="center",
-            alpha=0.9,
-            zorder=3
-        ))
+    # Iterate through all filtered_labels to create text objects
+    for i in range(len(filtered_labels)):
+        if i < len(filtered_coords): # Ensure coordinate exists
+            (x, y) = filtered_coords[i]
+            lbl = filtered_labels[i]
+            
+            # Dynamic font sizing (optional, you can set a fixed size)
+            current_marker_size = adjusted_sizes[i] if i < len(adjusted_sizes) else np.mean(adjusted_sizes)
+            font_size = max(7, min(10, 9 - 0.02 * np.sqrt(current_marker_size))) # Adjusted for potentially more labels
+            
+            texts.append(ax.text(
+                x, y, lbl,
+                fontsize=font_size, 
+                color='#333333', # Dark gray for good contrast
+                fontweight='normal',
+                zorder=7 
+            ))
     
-    # Use text adjustment to prevent overlapping WITHOUT arrows
     if texts:
         try:
-            # Configure adjustment parameters for cleaner results with stronger separation
-            adjust_text(texts, ax=ax, 
-                       arrowprops=None,  # Remove arrows completely
-                       expand_points=(2.5, 2.5),  # More space between points and text
-                       force_text=(1.2, 1.2),     # Stronger text separation force
-                       force_points=(0.3, 0.3))   # Moderate point repulsion
+            adjust_text(
+                texts,
+                ax=ax,
+                # arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.7), # Can enable if desired
+                expand_points=(1.2, 1.2), 
+                expand_text=(1.2, 1.2),
+                force_points=0.2, 
+                force_text=0.3,
+                lim=500 # More iterations for potentially more labels
+            )
         except Exception as e:
-            print(f"Could not adjust texts: {e}")
-            # Fallback to simple white outline if adjust_text fails
-            try:
-                import matplotlib.patheffects as path_effects
-                for text in texts:
-                    text.set_path_effects([
-                        path_effects.withStroke(linewidth=2, foreground='white')
-                    ])
-            except Exception:
-                print("Could not apply path effects either")
+            print(f"Could not adjust text labels: {e}")
 
 
 def plot_taxonomy_skeleton(ax: Axes, 
@@ -1639,6 +2691,59 @@ def plot_convex_hulls(ax: Axes,
 # Detection Example Extraction and Processing
 # -----------------------------------------------------------------------------
 
+def add_text_annotation(ax: Axes, x: float, y: float, 
+                       gt_leaf: str, pred_node: str, fallback_level: int, 
+                       confidence: float):
+    """
+    Add professional text annotation for detection examples.
+    
+    Args:
+        ax: Matplotlib axes to add text to
+        x: X coordinate for text placement
+        y: Y coordinate for text placement
+        gt_leaf: Ground truth class name
+        pred_node: Predicted class name
+        fallback_level: Hierarchical fallback level (0-5)
+        confidence: Prediction confidence score
+    """
+    # Get fallback level styling
+    encoding = get_fallback_visual_encoding(fallback_level)
+    text_color = encoding['color']
+    
+    # Format label text with improved readability
+    label_text = f"GT: {gt_leaf}\nPred: {pred_node}\nConf: {confidence:.2f}"
+    
+    # Create light background color with better contrast
+    rgb_color = mcolors.to_rgb(text_color)
+    light_color_rgb = tuple([min(1.0, c * 0.2 + 0.8) for c in rgb_color])
+    
+    # Professional text box styling
+    text_box = dict(
+        boxstyle='round,pad=0.4,rounding_size=0.3',
+        facecolor=light_color_rgb,
+        edgecolor=text_color,
+        alpha=0.85,
+        linewidth=2.0
+    )
+    
+    # Add text with enhanced styling
+    text = ax.text(
+        x, y, label_text,
+        fontsize=8.5,
+        color='black',
+        weight='bold',
+        ha='center', va='top',
+        zorder=11,
+        linespacing=1.2,
+        bbox=text_box
+    )
+    
+    # Add text outline for better readability
+    text.set_path_effects([
+        path_effects.withStroke(linewidth=0.8, foreground='white')
+    ])
+
+
 def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings, 
                                         hierarchy: HierarchyTree, labels: List[str],
                                         num_examples: int = 20, min_score: float = 0.3,
@@ -1649,10 +2754,18 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     """
     collector = EmbeddingCollector()
     
+    # Create inference configuration
+    inference_config = VisualizationConfig(
+        target_examples=num_examples,
+        batch_size=50,
+        min_score=min_score,
+        iou_threshold=iou_threshold
+    )
+    
     # Run inference with hooks to collect query embeddings
     results_with_embeddings = run_inference_with_hooks(
-        model, dataset, collector, target_examples=num_examples, batch_size=50, min_score=min_score, 
-        hierarchy=hierarchy, labels=labels, iou_threshold=iou_threshold)
+        model, dataset, collector, config=inference_config, 
+        hierarchy=hierarchy, labels=labels)
     
     if not results_with_embeddings:
         return []
@@ -1701,153 +2814,6 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         except (cv2.error, Exception):
             continue
-        
-        # IMMEDIATE VALIDATION: Check if collected embeddings match predictions using MODEL's distance calculation
-        # if len(query_embeddings) > 0 and len(pred_labels) > 0:
-        #     print(f"\n=== IMMEDIATE VALIDATION (at collection point) ===")
-        #     print(f"Image: {img_path}")
-        #     print(f"Query embeddings shape: {query_embeddings.shape}")
-        #     print(f"Prototype embeddings shape: {prototype_embeddings.shape}")
-        #     print(f"Pred labels: {pred_labels[:min(5, len(pred_labels))]}")  # Show first 5
-        #     print(f"Scores: {pred_scores[:min(5, len(pred_scores))]}")
-            
-        #     # Get the target classifier to use its distance calculation (includes temperature scaling!)
-        #     # CRITICAL FIX: For deformable DETR with as_two_stage=True:
-        #     # - The LAST layer (index 6) is used for encoder proposal generation
-        #     # - The SECOND-TO-LAST layer (index 5) is used for final decoder predictions!
-        #     last_branch_idx = get_last_classification_branch_index(model)
-            
-        #     # CRITICAL FIX: For DINO two-stage models:
-        #     # - cls_branches[6] is used for encoder proposal generation  
-        #     # - cls_branches[5] is used for actual decoder inference (which predict_by_feat uses)
-        #     # The inference always uses the LAST decoder layer, not the encoder proposal layer
-        #     is_two_stage = getattr(model, 'as_two_stage', False)
-        #     if is_two_stage:
-        #         # For two-stage DINO: inference uses the LAST decoder layer (second-to-last branch)
-        #         target_branch_idx = last_branch_idx - 1
-        #         stage_info = f"decoder layer {target_branch_idx} (actual inference path for two-stage)"
-        #     else:
-        #         # For single-stage: use last layer for final predictions  
-        #         target_branch_idx = last_branch_idx
-        #         stage_info = f"decoder layer {target_branch_idx} (single-stage mode)"
-                
-        #     target_classifier = getattr(model.bbox_head.cls_branches, str(target_branch_idx))
-            
-        #     print(f"    DEBUG: Total branches={last_branch_idx+1}, Two-stage={is_two_stage}, Using ACTUAL inference branch={target_branch_idx} ({stage_info})")
-            
-        #     # Test using the EXACT same distance calculation as the model
-        #     sample_size = min(3, len(query_embeddings), len(pred_labels))
-        #     for test_i in range(sample_size):
-        #         query = query_embeddings[test_i:test_i+1]
-        #         pred_label = pred_labels[test_i]
-        #         score = pred_scores[test_i]
-                
-        #         # Manual distance calculation (what we were using)
-        #         manual_distances = np.linalg.norm(prototype_embeddings - query, axis=1)
-        #         manual_nn_idx = np.argmin(manual_distances)
-                
-        #         # Model's ACTUAL distance calculation (includes temperature scaling!)
-        #         query_tensor = torch.tensor(query, dtype=torch.float32).unsqueeze(0)  # (1, 1, D) - add batch and query dims
-        #         prototype_tensor = torch.tensor(prototype_embeddings, dtype=torch.float32)  # (M, D)
-                
-        #         # Move to same device as model
-        #         device = next(target_classifier.parameters()).device
-        #         query_tensor = query_tensor.to(device)
-        #         prototype_tensor = prototype_tensor.to(device)
-                
-        #         # Test final classification branch
-        #         with torch.no_grad():
-        #             # Get raw distance logits
-        #             distance_logits = target_classifier.get_distance_logits(query_tensor, prototype_tensor)
-        #             model_distances = -distance_logits.squeeze().cpu().numpy()
-                    
-        #             # Apply bias if it exists
-        #             final_logits = distance_logits.squeeze()
-        #             if target_classifier.geometric_bias is not None:
-        #                 final_logits = final_logits + target_classifier.geometric_bias
-                    
-        #             # Get final prediction using logits (before sigmoid)
-        #             logit_based_prediction = torch.argmax(final_logits).item()
-                    
-        #             # Also test sigmoid-based prediction (what the inference code might use)
-        #             sigmoid_probs = torch.sigmoid(final_logits)
-        #             sigmoid_based_prediction = torch.argmax(sigmoid_probs).item()
-                
-        #         model_nn_idx = np.argmin(model_distances)
-                
-        #         print(f"  Query {test_i}: Pred={pred_label}, Manual_NN={manual_nn_idx}, Model_NN={model_nn_idx}, Score={score:.4f}")
-        #         print(f"    Pred class: {labels[pred_label] if pred_label < len(labels) else 'INVALID'}")
-        #         print(f"    Manual NN class: {labels[manual_nn_idx] if manual_nn_idx < len(labels) else 'INVALID'}")
-        #         print(f"    Model NN class: {labels[model_nn_idx] if model_nn_idx < len(labels) else 'INVALID'}")
-        #         print(f"    Logit-based pred: {labels[logit_based_prediction] if logit_based_prediction < len(labels) else 'INVALID'}")
-        #         print(f"    Sigmoid-based pred: {labels[sigmoid_based_prediction] if sigmoid_based_prediction < len(labels) else 'INVALID'}")
-                
-        #         # Show distance differences
-        #         print(f"    Manual distance to pred: {manual_distances[pred_label]:.4f}")
-        #         print(f"    Model distance to pred: {model_distances[pred_label]:.4f}")
-                
-        #         # Show which method matches the actual prediction
-        #         logit_matches = (logit_based_prediction == pred_label)
-        #         sigmoid_matches = (sigmoid_based_prediction == pred_label)
-        #         model_nn_matches = (model_nn_idx == pred_label)
-        #         print(f"    Logit-based matches: {logit_matches}, Sigmoid-based matches: {sigmoid_matches}, Model NN matches: {model_nn_matches}")
-                
-        #         # Show bias if it exists
-        #         if target_classifier.geometric_bias is not None:
-        #             print(f"    Geometric bias: {target_classifier.geometric_bias.item():.4f}")
-                    
-        #         # === SCORE RECALCULATION TEST ===
-        #         # Now recalculate the score from distance and compare with actual prediction score
-        #         pred_logit = final_logits[pred_label].item()
-        #         pred_distance = model_distances[pred_label]
-                
-        #         # Recalculate what the score should be based on distance
-        #         # Logit = -distance * temperature_scale + bias
-        #         expected_logit = -pred_distance
-        #         if target_classifier.use_temperature and target_classifier.logit_scale is not None:
-        #             temp_scale = target_classifier.logit_scale.exp().clamp(max=100).item()
-        #             expected_logit = expected_logit * temp_scale
-        #         if target_classifier.geometric_bias is not None:
-        #             expected_logit = expected_logit + target_classifier.geometric_bias.item()
-                    
-        #         expected_score = torch.sigmoid(torch.tensor(expected_logit)).item()
-        #         actual_score = score
-                
-        #         print(f"    Score Analysis:")
-        #         print(f"      Actual prediction score: {actual_score:.6f}")
-        #         print(f"      Expected score from distance: {expected_score:.6f}")
-        #         print(f"      Score difference: {abs(actual_score - expected_score):.6f}")
-        #         print(f"      Pred logit (from model): {pred_logit:.6f}")
-        #         print(f"      Expected logit (from distance): {expected_logit:.6f}")
-        #         print(f"      Logit difference: {abs(pred_logit - expected_logit):.6f}")
-                
-        #         if target_classifier.use_temperature and target_classifier.logit_scale is not None:
-        #             print(f"      Temperature scale: {temp_scale:.6f}")
-                    
-        #         # === INFERENCE CONSISTENCY CHECK ===
-        #         # Check if our calculations match the actual inference logic from _predict_by_feat_single
-        #         # The model uses cls_score.max(dim=-1) to get the highest logit, then sigmoid
-        #         max_logit_value, max_logit_class = final_logits.max(dim=-1)
-        #         inference_score = max_logit_value.sigmoid().item()
-        #         inference_class = max_logit_class.item()
-                
-        #         print(f"    Inference Logic Check:")
-        #         print(f"      Model's max logit class: {inference_class} -> {labels[inference_class] if inference_class < len(labels) else 'INVALID'}")
-        #         print(f"      Model's inference score: {inference_score:.6f}")
-        #         print(f"      Matches prediction class: {inference_class == pred_label}")
-        #         print(f"      Matches prediction score: {abs(inference_score - actual_score) < 1e-6}")
-                
-        #         # Show top 3 predictions for debugging
-        #         top3_logits = torch.topk(final_logits, 3)
-        #         top3_indices = top3_logits.indices.cpu().numpy()
-        #         top3_values = top3_logits.values.cpu().numpy()
-        #         print(f"    Top 3 logits: {top3_indices} -> {[labels[i] if i < len(labels) else 'INVALID' for i in top3_indices]}")
-        #         print(f"    Top 3 values: {top3_values}")
-                
-        #         # Show model distances to top predictions
-        #         print(f"    Model top 3 closest: {model_nn_idx} and others -> {[labels[i] if i < len(labels) else 'INVALID' for i in np.argsort(model_distances)[:3]]}")
-        #         print(f"    Model top 3 distances: {np.sort(model_distances)[:3]}")
-        #     print("=" * 60)
 
         # Process high-confidence predictions
         for i, (bbox, score, pred_label) in enumerate(zip(pred_bboxes, pred_scores, pred_labels)):
@@ -1966,27 +2932,131 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     return examples[:num_examples]
 
 
-def bbox_iou(box1, box2):
-    """Calculate IoU between two bounding boxes."""
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
+from typing import Any, Dict, List, Optional, Tuple, Set
+import numpy as np
+# Ensure these (or similar) imports are present in your file:
+# from hod.utils.tree import HierarchyTree, HierarchyNode
+# from mmdet.structures import DetDataSample # Or the actual type of 'result'
+
+def prepare_data_for_subtree_visualization(
+    all_prototype_data: List[Dict[str, Any]],  # List of {'node_name': str, 'embedding': np.ndarray, ...}
+    all_query_results: List[Dict[str, Any]],   # The output of run_inference_with_hooks
+    hierarchy_tree: Any, # Instance of HierarchyTree
+    focus_node_name: Optional[str], # Made Optional, can be None
+    model_class_labels: List[str]  # List mapping model output indices to class/node names
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Prepares and filters prototype and query data for visualizing a specific subtree.
+    If focus_node_name is None, it returns all data (for the full plot).
+
+    Args:
+        all_prototype_data: A list of dictionaries, where each dictionary
+                            represents a prototype and contains at least 'node_name' (str)
+                            and 'embedding' (np.ndarray).
+        all_query_results: The list of results from run_inference_with_hooks.
+                           Each item is a dictionary containing image path, ground truth,
+                           and inference results (including predicted instances with embeddings).
+        hierarchy_tree: An instance of the HierarchyTree.
+        focus_node_name: The name of the node to focus the visualization on.
+                         If None, all data is returned.
+        model_class_labels: A list of class name strings, where the index
+                            corresponds to the model's output label index.
+
+    Returns:
+        A tuple containing:
+        - filtered_prototype_data: List of prototype dicts.
+        - filtered_query_detections: List of query detection dicts.
+    """
+    filtered_prototype_data: List[Dict[str, Any]] = []
+    filtered_query_detections: List[Dict[str, Any]] = []
+
+    subtree_node_names: Optional[Set[str]] = None
+
+    if focus_node_name:
+        focus_node = hierarchy_tree.class_to_node.get(focus_node_name) # Use class_to_node
+        if not focus_node:
+            print(f"Warning: Focus node '{focus_node_name}' not found in the hierarchy. Plotting all data.")
+        else:
+            # descendants() in your tree.py includes the node itself
+            subtree_node_names = set(focus_node.descendants())
+            print(f"Focusing on subtree for node: '{focus_node_name}'. Found {len(subtree_node_names)} nodes in subtree.")
+    else:
+        print("No focus node specified. Preparing data for all nodes.")
+
+    # 1. Filter prototype data
+    for prototype in all_prototype_data:
+        if subtree_node_names is None or prototype.get('node_name') in subtree_node_names:
+            filtered_prototype_data.append(prototype)
+
+    # 2. Filter query detections
+    for image_result in all_query_results:
+        # Ensure 'result' key and 'pred_instances' attribute exist
+        if 'result' not in image_result or not hasattr(image_result['result'], 'pred_instances'):
+            # print(f"Warning: Skipping image_result due to missing 'result' or 'pred_instances'. Keys: {image_result.keys()}")
+            continue
+            
+        pred_instances = image_result['result'].pred_instances
+        gt_instances_list = image_result.get('gt_instances', [])
+
+        if not hasattr(pred_instances, 'query_embeddings') or \
+           len(pred_instances.query_embeddings) != len(pred_instances.labels):
+            # print(f"Warning: Skipping image {image_result.get('image_path', 'Unknown')} due to missing/mismatched query_embeddings.")
+            continue
+        
+        query_embeddings_tensor = pred_instances.query_embeddings
+
+        for i in range(len(pred_instances.labels)):
+            pred_label_idx = pred_instances.labels[i].item()
+            
+            if not (0 <= pred_label_idx < len(model_class_labels)):
+                # print(f"Warning: Predicted label index {pred_label_idx} is out of bounds for model_class_labels (len {len(model_class_labels)}).")
+                continue
+            predicted_node_name = model_class_labels[pred_label_idx]
+
+            if subtree_node_names is None or predicted_node_name in subtree_node_names:
+                query_embedding = query_embeddings_tensor[i].cpu().numpy()
+                
+                gt_node_names_for_image = []
+                if gt_instances_list: # gt_instances is a list of dicts
+                    for gt_inst in gt_instances_list:
+                        # Assuming gt_inst is a dict and 'bbox_label' is the key for the label index
+                        gt_label_idx = gt_inst.get('bbox_label', -1) 
+                        if isinstance(gt_label_idx, int) and 0 <= gt_label_idx < len(model_class_labels):
+                            gt_node_names_for_image.append(model_class_labels[gt_label_idx])
+                
+                filtered_query_detections.append({
+                    'embedding': query_embedding,
+                    'predicted_node_name': predicted_node_name,
+                    'gt_node_names_on_image': gt_node_names_for_image,
+                    'score': pred_instances.scores[i].item(),
+                    'bbox': pred_instances.bboxes[i].cpu().numpy(),
+                    'image_path': image_result.get('image_path'),
+                    'image_idx': image_result.get('image_idx')
+                    # Fallback level calculation would happen later
+                })
     
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-    
-    intersection = (x2 - x1) * (y2 - y1)
-    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union = area1 + area2 - intersection
-    
-    return intersection / union if union > 0 else 0.0
+    if focus_node_name:
+        print(f"Prepared data for focus node '{focus_node_name}': "
+              f"{len(filtered_prototype_data)} prototypes, "
+              f"{len(filtered_query_detections)} query detections.")
+    else:
+        print(f"Prepared data for all nodes: "
+              f"{len(filtered_prototype_data)} prototypes, "
+              f"{len(filtered_query_detections)} query detections.")
+
+    return filtered_prototype_data, filtered_query_detections
 
 
-def overlay_detection_thumbnails(ax: Axes, examples: List[Dict]):
-    """Overlay detection thumbnails with prediction labels on the UMAP plot."""
-    
+def overlay_detection_thumbnails(ax: Axes, examples: List[Dict], disable_layout_adjustment: bool = False):
+    """Overlay detection thumbnails with prediction labels on the UMAP plot.
+
+    Args:
+        ax: Matplotlib Axes to plot on.
+        examples: List of detection example dictionaries.
+        disable_layout_adjustment: If True, plots thumbnails at their exact UMAP coordinates
+                                   without grid-based repositioning. Defaults to False.
+    """
+
     # Calculate consistent thumbnail size as percentage of axis span
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
@@ -2006,64 +3076,79 @@ def overlay_detection_thumbnails(ax: Axes, examples: List[Dict]):
     data_width = xlim[1] - xlim[0]
     data_height = ylim[1] - ylim[0]
     
-    # Group examples by approximate regions to avoid overlapping
-    grid_size = int(np.ceil(np.sqrt(len(examples))))
-    region_width = data_width / grid_size
-    region_height = data_height / grid_size
+    if not disable_layout_adjustment:
+        # Group examples by approximate regions to avoid overlapping
+        grid_size = int(np.ceil(np.sqrt(len(examples))))
+        region_width = data_width / grid_size
+        region_height = data_height / grid_size
+        positions_used = {}  # To track used positions
     
     # Adjust positions to avoid overlaps - create a grid of possible positions
     positions_used = {}  # To track used positions
     
     for example in examples:
-        x, y = example['umap_coords']
+        x_orig, y_orig = example['umap_coords']
         crop = example['crop_image']
         fallback_level = example['fallback_level']
         pred_node = example['pred_node']
         gt_leaf = example['gt_leaf']
-        
-        # Calculate grid cell for this point
-        grid_x = min(int((x - xlim[0]) / region_width), grid_size-1)
-        grid_y = min(int((y - ylim[0]) / region_height), grid_size-1)
-        grid_key = (grid_x, grid_y)
-        
-        # If position is already used, slightly offset
-        offset_factor = 0
-        original_grid_key = grid_key
-        while grid_key in positions_used:
-            offset_factor += 1
-            angle = offset_factor * 45  # Try 8 directions
-            distance = min(region_width, region_height) * 0.3 * (offset_factor // 8 + 1)
-            offset_x = distance * np.cos(np.radians(angle))
-            offset_y = distance * np.sin(np.radians(angle))
-            
-            # Try new position
-            new_x = x + offset_x
-            new_y = y + offset_y
-            
-            # Ensure we stay within bounds
-            if (new_x < xlim[0] or new_x > xlim[1] or 
-                new_y < ylim[0] or new_y > ylim[1]):
-                continue
-                
-            grid_x = min(int((new_x - xlim[0]) / region_width), grid_size-1)
-            grid_y = min(int((new_y - ylim[0]) / region_height), grid_size-1)
+
+        display_x, display_y = x_orig, y_orig
+
+        if not disable_layout_adjustment:
+            # Calculate grid cell for this point
+            grid_x = min(int((x_orig - xlim[0]) / region_width), grid_size-1)
+            grid_y = min(int((y_orig - ylim[0]) / region_height), grid_size-1)
             grid_key = (grid_x, grid_y)
+        
+            # If position is already used, slightly offset
+            offset_factor = 0
+            original_grid_key = grid_key
+            current_display_x, current_display_y = x_orig, y_orig # Start with original for adjustment
             
-            # Prevent infinite loop
-            if offset_factor > 20:
-                grid_key = original_grid_key  # Revert to original if can't find space
-                break
+            while grid_key in positions_used and offset_factor <= 20: # Limit iterations
+                offset_factor += 1
+                angle = offset_factor * 45 
+                distance_scale = 0.15 * (offset_factor // 8 + 1) # Increase distance for further attempts
+                # Reduce distance if region is small to prevent jumping too far
+                effective_region_dim = min(region_width, region_height) if region_width > 0 and region_height > 0 else min(data_width, data_height) * 0.1
+                distance = effective_region_dim * distance_scale
+
+                offset_x = distance * np.cos(np.radians(angle))
+                offset_y = distance * np.sin(np.radians(angle))
+                
+                new_x_candidate = x_orig + offset_x # Offset from original true coordinate
+                new_y_candidate = y_orig + offset_y
+                
+                # Check bounds before assigning as new grid key
+                if (new_x_candidate >= xlim[0] and new_x_candidate <= xlim[1] and 
+                    new_y_candidate >= ylim[0] and new_y_candidate <= ylim[1]):
+                    
+                    grid_x_candidate = min(int((new_x_candidate - xlim[0]) / region_width), grid_size-1)
+                    grid_y_candidate = min(int((new_y_candidate - ylim[0]) / region_height), grid_size-1)
+                    grid_key_candidate = (grid_x_candidate, grid_y_candidate)
+
+                    if grid_key_candidate not in positions_used:
+                        grid_key = grid_key_candidate
+                        current_display_x, current_display_y = new_x_candidate, new_y_candidate
+                        break 
+                
+                if offset_factor == 20: # Max attempts reached
+                    # Fallback: place it at the center of its original grid cell with some jitter
+                    # if the original cell itself is not the one causing repeated collisions
+                    # This is a simplified fallback, might still overlap if original cell is crowded
+                    center_x = xlim[0] + (min(int((x_orig - xlim[0]) / region_width), grid_size-1) + 0.5) * region_width
+                    center_y = ylim[0] + (min(int((y_orig - ylim[0]) / region_height), grid_size-1) + 0.5) * region_height
+                    jitter_x = region_width * 0.1 * np.random.uniform(-1, 1)
+                    jitter_y = region_height * 0.1 * np.random.uniform(-1, 1)
+                    current_display_x = center_x + jitter_x
+                    current_display_y = center_y + jitter_y
+                    # We don't update grid_key here, just accept the position
+                    break 
+            
+            positions_used[grid_key] = True
+            display_x, display_y = current_display_x, current_display_y
         
-        # Mark position as used
-        positions_used[grid_key] = True
-        
-        # Adjusted display coordinates - center in the grid cell with slight jitter
-        center_x = xlim[0] + (grid_x + 0.5) * region_width
-        center_y = ylim[0] + (grid_y + 0.5) * region_height
-        jitter_x = region_width * 0.2 * np.random.uniform(-1, 1)
-        jitter_y = region_height * 0.2 * np.random.uniform(-1, 1)
-        display_x = center_x + jitter_x
-        display_y = center_y + jitter_y
         
         # Get visual encoding
         encoding = get_fallback_visual_encoding(fallback_level)
@@ -2233,60 +3318,248 @@ def add_detection_border_legend(ax: Axes):
     title.set_fontweight('bold')
 
 
+def plot_fallback_arrows(
+    ax: Axes,
+    query_examples: List[Dict[str, Any]],
+    prototype_coords: Dict[str, np.ndarray]  # Maps node names (both pred and GT) to UMAP coords
+):
+    """
+    Draws two arrows for each query example:
+    1. Predicted Prototype -> Query (solid, colored by fallback_level)
+    2. Query -> Ground Truth Prototype (dashed, gray)
+
+    Args:
+        ax: Matplotlib axes to plot on.
+        query_examples: List of query example dicts. Each must contain:
+                        'umap_coords' (np.ndarray for query's 2D position),
+                        'pred_node' (str, name of predicted prototype),
+                        'gt_leaf' (str, name of ground truth leaf prototype),
+                        'fallback_level' (int).
+        prototype_coords: Dict mapping prototype node names to their UMAP coordinates.
+    """
+    arrows_drawn_pred_to_query = 0
+    arrows_drawn_query_to_gt = 0
+
+    if not query_examples:
+        print("No query examples provided for fallback arrows.")
+        return
+
+    # For debugging, let's see a few keys from prototype_coords
+    # print(f"DEBUG: Sample keys in prototype_coords: {list(prototype_coords.keys())[:20]}")
+
+
+    for idx, example in enumerate(query_examples): # Added enumerate for easier debugging
+        query_coord = example.get('umap_coords')
+        predicted_node_name = example.get('pred_node')
+        gt_leaf_name = example.get('gt_leaf')
+        fallback_level = example.get('fallback_level')
+        image_path_short = pathlib.Path(example.get('image_path', 'N/A')).name
+
+
+        if query_coord is None:
+            # print(f"DEBUG Arrow Skip (Example {idx}, Img: {image_path_short}): Query UMAP coordinate is None.")
+            continue
+        if predicted_node_name is None:
+            # print(f"DEBUG Arrow Skip (Example {idx}, Img: {image_path_short}): Predicted node name is None.")
+            continue
+        if gt_leaf_name is None:
+            # print(f"DEBUG Arrow Skip (Example {idx}, Img: {image_path_short}): GT leaf name is None.")
+            continue
+        if fallback_level is None:
+            # print(f"DEBUG Arrow Skip (Example {idx}, Img: {image_path_short}): Fallback level is None.")
+            continue
+
+        # --- Arrow 1: Predicted Prototype to Query ---
+        predicted_prototype_coord = prototype_coords.get(predicted_node_name)
+        if predicted_prototype_coord is not None:
+            encoding = get_fallback_visual_encoding(fallback_level)
+            arrow_color_pred = encoding['color']
+            
+            arrowprops_pred_to_query = dict(
+                arrowstyle="->,head_length=0.7,head_width=0.4",
+                color=arrow_color_pred,
+                linestyle='-', 
+                linewidth=2.0,
+                shrinkA=1,  # Shrink from predicted prototype marker
+                shrinkB=1   # Shrink to query/thumbnail center
+            )
+            try:
+                # Arrowhead points TO query_coord, FROM predicted_prototype_coord
+                ax.annotate(
+                    "", 
+                    xy=query_coord,                         # End point (arrowhead at query)
+                    xytext=predicted_prototype_coord,       # Start point (tail at prediction)
+                    arrowprops=arrowprops_pred_to_query, 
+                    zorder=5.1 
+                )
+                arrows_drawn_pred_to_query += 1
+            except Exception as e:
+                print(f"Error drawing PRED_TO_QUERY arrow for {predicted_node_name} (Img: {image_path_short}): {e}")
+        else:
+            # print(f"DEBUG PRED_TO_QUERY Arrow (Example {idx}, Img: {image_path_short}): Not drawn. Predicted prototype '{predicted_node_name}' has no UMAP coordinate. Query at {query_coord}.")
+            pass
+
+
+        # --- Arrow 2: Query to Ground Truth Prototype ---
+        # This arrow remains the same: from query_coord to gt_prototype_coord
+        gt_prototype_coord = prototype_coords.get(gt_leaf_name)
+
+        if gt_prototype_coord is not None:
+            arrowprops_query_to_gt = dict(
+                arrowstyle="->,head_length=0.6,head_width=0.3", 
+                color='gray', # Or a distinct "GT" color
+                linestyle='--', 
+                linewidth=1.8,
+                shrinkA=1, # Shrink from query/thumbnail center
+                shrinkB=1  # Shrink to GT prototype marker
+            )
+            try:
+                # Arrowhead points TO gt_prototype_coord, FROM query_coord
+                ax.annotate(
+                    "", 
+                    xy=gt_prototype_coord, # End point (arrowhead at GT)
+                    xytext=query_coord,    # Start point (tail at query)
+                    arrowprops=arrowprops_query_to_gt, 
+                    zorder=5 
+                )
+                arrows_drawn_query_to_gt += 1
+            except Exception as e:
+                print(f"Error drawing QUERY_TO_GT arrow for {gt_leaf_name} (Img: {image_path_short}): {e}")
+        else:
+            # This existing print is also helpful, let's make it more specific
+            # print(f"DEBUG QUERY_TO_GT Arrow (Example {idx}, Img: {image_path_short}, GT: {gt_leaf_name}): Not drawn. GT prototype '{gt_leaf_name}' has no UMAP coordinate. Query at {query_coord}.")
+            pass
+
+
+def plot_prototype_scatter(ax: Axes, 
+                          filtered_coords: np.ndarray, 
+                          marker_sizes: np.ndarray, 
+                          fill_colors: List[Any], 
+                          edge_colors: List[Any], 
+                          filtered_labels: List[str],
+                          viz_manager: Optional['VisualizationManager'] = None):
+    """
+    Plot UMAP scatter points with publication-quality styling and improved readability.
+    Attempts to label all nodes.
+    
+    Args:
+        ax: Matplotlib axes to plot on
+        filtered_coords: Coordinates for each prototype (N, 2)
+        marker_sizes: Marker sizes for each prototype (N,)
+        fill_colors: Fill colors for each prototype
+        edge_colors: Edge colors for each prototype  
+        filtered_labels: Label text for each prototype
+        viz_manager: Optional VisualizationManager for consistent styling
+    """
+    if filtered_coords.size == 0 or marker_sizes.size == 0:
+        print("Warning: No data to plot in plot_prototype_scatter.")
+        return
+
+    base_scale = 1.4 if viz_manager else 1.3
+    adjusted_sizes = marker_sizes * base_scale
+    
+    ax.scatter(
+        filtered_coords[:, 0], filtered_coords[:, 1],
+        s=adjusted_sizes,
+        c=fill_colors,
+        edgecolors=edge_colors,
+        linewidths=2.2,
+        alpha=0.95,
+        zorder=6  # Ensure prototypes are above arrows (zorder=5-5.1)
+    )
+
+    texts = []
+    # Iterate through ALL filtered_labels to create text objects
+    # No explicit limit on the number of labels here.
+    for i in range(len(filtered_labels)):
+        if i < len(filtered_coords): # Ensure coordinate exists for the label
+            (x, y) = filtered_coords[i]
+            lbl = filtered_labels[i]
+            
+            # Consistent font size for potentially many labels
+            font_size = 7.5 
+            
+            texts.append(ax.text(
+                x, y, lbl,
+                fontsize=font_size, 
+                color='#333333', 
+                fontweight='normal',
+                zorder=7 # Labels above prototype markers
+            ))
+    
+    if texts:
+        try:
+            # adjust_text will try to prevent overlaps for all generated texts
+            adjust_text(
+                texts,
+                ax=ax,
+                expand_points=(1.1, 1.1), 
+                expand_text=(1.1, 1.1),
+                force_points=0.15, 
+                force_text=0.25,
+                lim=400 # Max iterations for adjust_text
+            )
+        except Exception as e:
+            print(f"Could not adjust text labels: {e}")
+
+
 # -----------------------------------------------------------------------------
 # Main Plotting Function
 # -----------------------------------------------------------------------------
 
-def plot_combined_umap_with_detections(model_path: str, config_path: str,
-                                      save_path: Optional[str] = None,
-                                      num_examples: int = 20,  # Fixed to match argument parser default
-                                      random_state: int = 42,
-                                      min_score: float = 0.3,
-                                      iou_threshold: float = 0.5,
-                                      use_mds: bool = False):
+def plot_combined_umap_with_detections(
+    model_path: str, 
+    config_path: str,
+    save_path: Optional[str] = None,
+    num_examples_to_collect: int = 80, # Renamed and default increased
+    num_examples_display_p1p3: int = 20, # New parameter for P1/P3 display
+    random_state: int = 42,
+    min_score: float = 0.3,
+    iou_threshold: float = 0.5,
+    use_mds: bool = False,
+    focus_node_name: Optional[str] = None
+):
     """
-    Create the combined UMAP/MDS figure with prototype embeddings and detection examples.
-    Uses forward hooks to capture actual query embeddings for scientific accuracy.
-    
-    Args:
-        model_path: Path to trained model checkpoint
-        config_path: Path to model config file (annotation file will be inferred from this)
-        save_path: Optional path to save the figure
-        num_examples: Number of detection examples to overlay (default: 12)
-        random_state: Random seed for UMAP/MDS
-        min_score: Minimum confidence score for detections
-        iou_threshold: IoU threshold for matching detected bboxes to ground truth (default: 0.5)
-        use_mds: If True, use MetricMDS instead of UMAP for better distance preservation
+    Create a 3-panel visualization:
+    1. Full UMAP/MDS with prototype embeddings and detection examples.
+    2. Placeholder for Parent/Ancestor fallback visualization.
+    3. Focused UMAP/MDS view on a specific subtree.
     """
     
-    print("Setting up dataset and model for hooks-based embedding extraction...")
-    # Load config and dataset first
+    print("Setting up dataset and model...")
     cfg = Config.fromfile(config_path)
     cfg = replace_cfg_vals(cfg)
     update_data_root(cfg)
     init_default_scope(cfg.get('default_scope', 'mmdet'))
     
     dataset = DATASETS.build(cfg.test_dataloader.dataset)
-    
-    # Initialize model for inference with hooks
-    model = init_detector(config_path, model_path, device='cuda')
-    
-    print("Loading prototype embeddings and hierarchy (without UMAP fitting)...")
-    # Load prototype embeddings and basic data structures first, but don't fit UMAP yet
-    try:
-        # Use the model's prototypes property to get embeddings in the same space
-        # as the query embeddings captured from get_projected_features hook
-        last_branch_idx = get_last_classification_branch_index(model) - 1
-        print(f"Using embeddings from branch {last_branch_idx}: bbox_head.cls_branches.{last_branch_idx}.prototypes")
-        target_classifier = getattr(model.bbox_head.cls_branches, str(last_branch_idx))
-        prototype_embeddings = target_classifier.prototypes.detach().cpu().numpy()
+    model = init_detector(config_path, model_path, device='cuda') # Ensure device is appropriate
 
-        # Extract basic hierarchy data from config for initial setup
-        from mmengine.fileio import load
-        cfg = Config.fromfile(config_path)
-        
-        # Extract annotation file path
-        ann_file_path = None
+    print("Loading prototype embeddings and hierarchy for UMAP fitting...")
+    # This part is largely the same as your existing function:
+    # It calls load_embeddings_and_umap, extract_detection_examples_with_hooks,
+    # and prepares all necessary data for the full plot.
+
+    # --- Existing data loading and UMAP projection logic ---
+    # (Copied and adapted from your existing plot_combined_umap_with_detections)
+    
+    # Get prototype embeddings directly from the model for consistency
+    # This logic might need to be aligned with how get_target_classifier works if you use that
+    try:
+        last_branch_idx = get_last_classification_branch_index(model)
+        # Assuming the relevant prototypes are in the second-to-last branch if two-stage, else last.
+        # This needs to be consistent with how query embeddings are hooked.
+        # For simplicity, let's assume get_target_classifier helps here or direct access:
+        target_classifier_module = get_target_classifier(model) # You might need to define/refine this
+        prototype_embeddings_from_model = target_classifier_module.prototypes.detach().cpu().numpy()
+    except Exception as e:
+        print(f"Error getting prototype_embeddings_from_model: {e}. Check model structure and get_target_classifier.")
+        return
+
+    # Load hierarchy and labels from annotation file (as in load_embeddings_and_umap)
+    # This part is crucial and should be robust
+    ann_file_path = None
+    try:
         if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
             ann_file = cfg.test_dataloader.dataset.ann_file
             data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg.test_dataloader.dataset, 'data_root') else ''
@@ -2294,175 +3567,251 @@ def plot_combined_umap_with_detections(model_path: str, config_path: str,
                 ann_file_path = os.path.join(data_root, ann_file)
             else:
                 ann_file_path = ann_file
+        if ann_file_path is None: # Fallback
+            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader.dataset, 'data_root') else 'data/aircraft'
+            ann_file_path = os.path.join(data_root, 'aircraft_test.json') # Default path
         
-        if ann_file_path is None:
-            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset') and hasattr(cfg.test_dataloader.dataset, 'data_root') else 'data/aircraft'
-            ann_file_path = os.path.join(data_root, 'aircraft_test.json')
-        
-        # Load annotation data for hierarchy
-        ann = load(ann_file_path)
-        if not isinstance(ann, dict) or "categories" not in ann or "taxonomy" not in ann:
-            print("Error: Annotation file is missing 'categories' or 'taxonomy' keys.")
+        ann_data = load(ann_file_path)
+        if not isinstance(ann_data, dict) or "categories" not in ann_data or "taxonomy" not in ann_data:
+            print(f"Error: Annotation file {ann_file_path} is missing 'categories' or 'taxonomy'.")
             return
         
-        categories = ann["categories"]
-        labels = [cat["name"] for cat in categories]
-        hierarchy = HierarchyTree(ann["taxonomy"])
-        hue_map = build_hue_map(hierarchy.root)
-        
+        categories_from_ann = ann_data["categories"]
+        labels_from_ann = [cat["name"] for cat in categories_from_ann] # These are usually leaf node names
+        hierarchy = HierarchyTree(ann_data["taxonomy"])
+        # Note: load_embeddings_and_umap also loads hierarchy and labels. Consider streamlining.
     except Exception as e:
-        print(f"Error loading basic data: {e}")
+        print(f"Error loading annotation data from {ann_file_path}: {e}")
         return
-    
+
     print("Extracting detection examples with actual query embeddings using hooks...")
-    # Extract detection examples using hooks to get ACTUAL query embeddings
-    detection_examples = extract_detection_examples_with_hooks(
-        model, dataset, prototype_embeddings, hierarchy, labels, num_examples, min_score, iou_threshold)
+    # Collect a larger pool of examples using num_examples_to_collect
+    initial_all_detection_examples = extract_detection_examples_with_hooks(
+        model, dataset, prototype_embeddings_from_model,
+        hierarchy, labels_from_ann, 
+        num_examples_to_collect, # Use the larger number here
+        min_score, iou_threshold
+    )
+
+    # Filter for valid examples with feature_vectors; this becomes our main pool
+    processed_all_detection_examples = []
+    query_embeddings_for_umap_list = []
+    if initial_all_detection_examples:
+        for ex in initial_all_detection_examples:
+            if 'feature_vector' in ex and ex['feature_vector'] is not None:
+                processed_all_detection_examples.append(ex)
+                query_embeddings_for_umap_list.append(ex['feature_vector'])
+        print(f"Successfully processed {len(processed_all_detection_examples)} examples with feature vectors from {len(initial_all_detection_examples)} initial.")
     
-    # Collect query embeddings from examples for joint UMAP fitting
-    query_embeddings = None
-    if detection_examples:
-        query_embeddings = np.array([ex['feature_vector'] for ex in detection_examples])
-        print(f"Collected {len(query_embeddings)} ACTUAL query embeddings for joint UMAP fitting")
-    
-    print("Performing single joint projection fitting with prototypes + query embeddings...")
-    # Now do a SINGLE projection fitting with both prototype and query embeddings together
-    projection_method = "MetricMDS" if use_mds else "UMAP"
-    print(f"Using {projection_method} for projection...")
-    embeddings, _projection_model, hierarchy, hue_map, labels, node_coords, query_projections = load_embeddings_and_umap(
-        model_path, config_path, random_state, query_embeddings, prototype_embeddings, use_mds, detection_examples)
-    
-    if embeddings is None or hierarchy is None or labels is None or node_coords is None or hue_map is None:
-        print("Failed to load embeddings or related data structures. Exiting.")
+    query_embeddings_for_umap = np.array(query_embeddings_for_umap_list) if query_embeddings_for_umap_list else None
+
+    if not processed_all_detection_examples:
+        print("No valid detection examples with feature vectors collected. Cannot proceed.")
+        # Optionally, create an empty plot or just return
+        fig, ax = plt.subplots(1, 1, figsize=(12,12))
+        ax.text(0.5, 0.5, "No data to plot.", ha='center', va='center')
+        if save_path:
+            plt.savefig(save_path)
+            print(f"Empty plot saved to {save_path}")
+        plt.show()
         return
     
-    print("Using joint UMAP projections for detection examples...")
-    # Use the query projections computed during joint UMAP fitting
-    if detection_examples and query_projections is not None:
-        print(f"Using {len(query_projections)} pre-computed query projections from joint UMAP fitting")
-        # Update examples with the joint UMAP coordinates
-        for i, example in enumerate(detection_examples):
-            if i < len(query_projections):
-                example['umap_coords'] = query_projections[i]
-                print(f"Example {i}: {example['gt_leaf']} → {example['pred_node']} (level {example['fallback_level']})")
-                print(f"  Positioned at UMAP coords: ({query_projections[i][0]:.2f}, {query_projections[i][1]:.2f})")
-            else:
-                print(f"Warning: Missing projection for example {i}")
-                
-        # Check if the projections make sense (look for outliers)
-        if len(query_projections) > 2:
-            distances = []
-            for i in range(len(query_projections)):
-                # Find closest prototype
-                min_dist = float('inf')
-                for label, coord in node_coords.items():
-                    dist = np.sqrt(np.sum((query_projections[i] - coord)**2))
-                    if dist < min_dist:
-                        min_dist = dist
-                distances.append(min_dist)
-            
-            avg_dist = np.mean(distances)
-            max_dist = np.max(distances)
-            print(f"Average distance to nearest prototype: {avg_dist:.2f}")
-            print(f"Maximum distance to nearest prototype: {max_dist:.2f}")
-            if max_dist > 3 * avg_dist:
-                print("Warning: Some examples are very far from prototypes. Check embedding extraction.")
-    
-    print("Calculating visual attributes...")
-    # Calculate visual attributes for prototypes
-    plotted_nodes = set(node_coords.keys())
-    depth_cmap = plt.get_cmap('cividis_r')
-    
-    filtered_labels, filtered_coords, marker_sizes, fill_colors, edge_colors, _, _ = calculate_visual_attributes(
-        hierarchy, plotted_nodes, node_coords, labels, hue_map, depth_cmap)
-    
-    if len(filtered_labels) == 0:
-        print("No valid prototype data to plot. Exiting.")
+    print(f"Performing single joint projection with {len(prototype_embeddings_from_model)} prototypes + {len(query_embeddings_for_umap) if query_embeddings_for_umap is not None else 0} query embeddings...")
+    _prototype_embeds_raw, _projection_model, hierarchy_from_load, hue_map, \
+    proj_labels, proj_node_coords, proj_query_coords = load_embeddings_and_umap(
+        model_path, config_path, random_state, 
+        query_embeddings=query_embeddings_for_umap, 
+        prototype_embeddings=prototype_embeddings_from_model,
+        use_mds=use_mds, 
+        detection_examples=processed_all_detection_examples # Pass all processed examples for validation
+    )
+
+    if _prototype_embeds_raw is None or hierarchy_from_load is None or proj_labels is None or proj_node_coords is None or hue_map is None:
+        print("Failed to load embeddings or related data structures from load_embeddings_and_umap. Exiting.")
         return
     
-    print("Creating plot...")
-    # Create the plot with publication-quality dimensions
-    fig, ax = plt.subplots(figsize=(20, 18), dpi=120)  # Higher DPI for better detail
-    
-    # Use a clean, professional style
+    hierarchy = hierarchy_from_load 
+
+    # Assign UMAP coordinates to all processed detection examples
+    if proj_query_coords is not None and len(proj_query_coords) == len(processed_all_detection_examples):
+        for i, example in enumerate(processed_all_detection_examples):
+            example['umap_coords'] = proj_query_coords[i]
+    elif proj_query_coords is not None:
+        print(f"Warning: Mismatch assigning UMAP coords. Projected queries: {len(proj_query_coords)}, Processed examples: {len(processed_all_detection_examples)}.")
+        # Attempt to assign to the ones that match, others won't have 'umap_coords'
+        min_len = min(len(proj_query_coords), len(processed_all_detection_examples))
+        for i in range(min_len):
+            processed_all_detection_examples[i]['umap_coords'] = proj_query_coords[i]
+
+
+    # --- End of adapted data loading ---
+
+    print("Calculating visual attributes for the main plot...")
+    depth_cmap = plt.get_cmap('cividis_r') # Or your preferred cmap
+
+    # Setup figure for 3 panels
+    fig, axes = plt.subplots(1, 3, figsize=(36, 12), dpi=120) # Adjusted figsize for 1x3
+    ax1, ax2, ax3 = axes.ravel()
     plt.style.use('seaborn-v0_8-whitegrid')
-    
-    # Set up background with subtle gradient for professional look
-    ax.set_facecolor('#f9f9f9')  # Light gray background
     fig.patch.set_facecolor('white')
+
+    # === Panel 1: Full Structure ===
+    ax1.set_facecolor('#f9f9f9')
+    print("Populating Panel 1: Full Structure")
     
-    # Plot taxonomy components with adjusted z-order for better layering
-    plot_convex_hulls(ax, plotted_nodes, hierarchy, node_coords, hue_map)
-    plot_taxonomy_skeleton(ax, plotted_nodes, hierarchy, node_coords)
-    plot_prototype_scatter(ax, filtered_coords, marker_sizes, fill_colors, edge_colors, filtered_labels)
+    plotted_nodes_p1 = set(proj_node_coords.keys()) 
+    attrs_p1_list = calculate_visual_attributes(
+        hierarchy, plotted_nodes_p1, proj_node_coords, proj_labels, hue_map, depth_cmap
+    )
+    filtered_labels_p1, filtered_coords_p1, marker_sizes_p1, \
+    fill_colors_p1, edge_colors_p1, _, _ = attrs_p1_list
+
+    if filtered_labels_p1:
+        plot_convex_hulls(ax1, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
+        plot_taxonomy_skeleton(ax1, plotted_nodes_p1, hierarchy, proj_node_coords)
+        plot_prototype_scatter(ax1, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
+    else:
+        ax1.text(0.5, 0.5, "No prototype data for Panel 1", ha='center', va='center')
+
+    # Select a balanced subset for display in Panel 1
+    examples_with_coords_p1 = [ex for ex in processed_all_detection_examples if 'umap_coords' in ex]
+    detection_examples_for_p1_display = _select_balanced_subset(examples_with_coords_p1, num_examples_display_p1p3)
     
-    # Overlay detection examples
-    if detection_examples:
-        overlay_detection_thumbnails(ax, detection_examples)
+    if detection_examples_for_p1_display:
+        print(f"Panel 1: Displaying {len(detection_examples_for_p1_display)} balanced example thumbnails.")
+        # Log the distribution for Panel 1 display
+        p1_display_counts = [0]*6
+        for ex_p1 in detection_examples_for_p1_display: p1_display_counts[ex_p1['fallback_level']] +=1
+        print(f"  Panel 1 display distribution: {p1_display_counts}")
+
+        overlay_detection_thumbnails(ax1, detection_examples_for_p1_display, disable_layout_adjustment=False)
     
-    # Extract model name for title
-    model_name = pathlib.Path(model_path).stem.replace('_', ' ').title()
-    if len(model_name) > 30:  # Shorten very long model names
-        model_name = model_name[:27] + "..."
-        
-    # Configure plot with publication-quality styling
+    add_detection_border_legend(ax1)
     projection_name = "MetricMDS" if use_mds else "UMAP"
-    ax.set_title(f"{projection_name} Visualization of Prototype Embeddings with Detection Examples\n"
-                f"GT-Prediction Relationship Analysis | {model_name}", 
-                fontsize=16, pad=20, fontweight='bold')
-    
-    # Use professional font for axes labels
-    ax.set_xlabel(f"{projection_name} Dimension 1", fontsize=14, labelpad=15)
-    ax.set_ylabel(f"{projection_name} Dimension 2", fontsize=14, labelpad=15)
-    
-    # Ensure aspect ratio is maintained for better visual perception
-    ax.set_aspect('equal', adjustable='box')
-    
-    # Remove ticks for cleaner look
-    ax.tick_params(axis='both', which='both', bottom=False, top=False, 
-                  left=False, right=False, labelbottom=False, labelleft=False)
-    
-    # Add subtle grid for spatial reference
-    ax.grid(True, linestyle='--', alpha=0.2, color='gray')
-    
-    # Add legend explaining the colors
-    add_detection_border_legend(ax)
-    
-    # Add professional border around the plot
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_color('#888888')
-        spine.set_linewidth(0.8)
+    model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title()
+    ax1.set_title(f"Panel 1: Full Structure ({projection_name})\n{model_name_stem}", fontsize=14, pad=15, fontweight='bold')
+    ax1.set_xlabel(f"{projection_name} Dim 1", fontsize=12); ax1.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
+    ax1.set_aspect('equal', adjustable='box')
+    ax1.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
+    ax1.grid(True, linestyle='--', alpha=0.2, color='gray')
+    for spine in ax1.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
+
+    # === Panel 2: Parent + Ancestor Fallbacks ===
+    ax2.set_facecolor('#f9f9f9')
+    print("Populating Panel 2: Parent/Ancestor Fallbacks")
+
+    panel2_fallback_levels = {1, 2} # Focus on Parent and Grandparent
+    # Filter from the larger pool of all_processed_detection_examples
+    panel2_detection_examples = [
+        ex for ex in processed_all_detection_examples if ex.get('fallback_level') in panel2_fallback_levels and 'umap_coords' in ex
+    ]
+    print(f"Panel 2: Found {len(panel2_detection_examples)} examples (from pool of {len(processed_all_detection_examples)}) with fallback levels {panel2_fallback_levels}.")
+
+    if filtered_labels_p1: 
+        plot_taxonomy_skeleton(ax2, plotted_nodes_p1, hierarchy, proj_node_coords)
+        plot_convex_hulls(ax2, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
+        plot_prototype_scatter(ax2, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
+    else:
+        ax2.text(0.5, 0.5, "No prototype data for Panel 2", ha='center', va='center')
+
+    if panel2_detection_examples:
+        # For Panel 2, we might want to show all arrows, but thumbnails could be very dense.
+        # The disable_layout_adjustment=True will plot thumbnails at exact UMAP coords, leading to overlap.
+        # This is acceptable if the focus is on the arrows.
+        print(f"Panel 2: Displaying {len(panel2_detection_examples)} example thumbnails (layout adjustment disabled) and arrows.")
+        overlay_detection_thumbnails(ax2, panel2_detection_examples, disable_layout_adjustment=True)
+        plot_fallback_arrows(ax2, panel2_detection_examples, proj_node_coords)
+    else:
+        print(f"No detection examples to display for Panel 2 (fallback levels {panel2_fallback_levels}).")
+
+    add_detection_border_legend(ax2) 
+    ax2.set_title("Panel 2: Hierarchical Retreat\n(Exact, Parent, Grandparent Fallbacks)", fontsize=14, pad=15, fontweight='bold')
+    ax2.set_xlabel(f"{projection_name} Dim 1", fontsize=12)
+    ax2.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
+    ax2.set_aspect('equal', adjustable='box')
+    ax2.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
+    ax2.grid(True, linestyle='--', alpha=0.2, color='gray')
+    for spine in ax2.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
+
+    # === Panel 3: Interactive Subtree Zoom ===
+    ax3.set_facecolor('#f9f9f9')
+    print(f"Populating Panel 3: Subtree Zoom (Focus: {focus_node_name})")
+    if focus_node_name and hierarchy.class_to_node.get(focus_node_name):
+        focus_node_obj = hierarchy.class_to_node.get(focus_node_name)
+        subtree_node_names = set(focus_node_obj.descendants())
+        sub_proj_node_coords = {name: coords for name, coords in proj_node_coords.items() if name in subtree_node_names}
+        
+        # Filter from all_processed_detection_examples, then take a display subset
+        sub_detection_examples_all_in_subtree = [
+            ex for ex in processed_all_detection_examples 
+            if ex.get('pred_node') in subtree_node_names and 'umap_coords' in ex
+        ]
+        # Select a balanced subset for display in Panel 3
+        sub_detection_examples_for_p3_display = _select_balanced_subset(sub_detection_examples_all_in_subtree, num_examples_display_p1p3)
+        
+        plotted_nodes_p3 = set(sub_proj_node_coords.keys())
+        
+        if plotted_nodes_p3:
+            attrs_p3_list = calculate_visual_attributes(
+                hierarchy, plotted_nodes_p3, sub_proj_node_coords, proj_labels, hue_map, depth_cmap
+            )
+            filtered_labels_p3, filtered_coords_p3, marker_sizes_p3, \
+            fill_colors_p3, edge_colors_p3, _, _ = attrs_p3_list
+
+            if filtered_labels_p3:
+                plot_convex_hulls(ax3, plotted_nodes_p3, hierarchy, sub_proj_node_coords, hue_map)
+                plot_taxonomy_skeleton(ax3, plotted_nodes_p3, hierarchy, sub_proj_node_coords)
+                plot_prototype_scatter(ax3, filtered_coords_p3, marker_sizes_p3, fill_colors_p3, edge_colors_p3, filtered_labels_p3)
+            else:
+                ax3.text(0.5, 0.5, f"No prototype data for subtree '{focus_node_name}'", ha='center', va='center')
+
+            if sub_detection_examples_for_p3_display:
+                print(f"Panel 3: Displaying {len(sub_detection_examples_for_p3_display)} balanced example thumbnails for subtree.")
+                # Log the distribution for Panel 3 display
+                p3_display_counts = [0]*6
+                for ex_p3 in sub_detection_examples_for_p3_display: p3_display_counts[ex_p3['fallback_level']] +=1
+                print(f"  Panel 3 display distribution: {p3_display_counts}")
+                overlay_detection_thumbnails(ax3, sub_detection_examples_for_p3_display, disable_layout_adjustment=False)
+        else:
+            ax3.text(0.5, 0.5, f"No data to display for focus node '{focus_node_name}'", ha='center', va='center', fontsize=12, color='gray')
+            ax3.set_title(f"Panel 3: Subtree '{focus_node_name}' (Empty)", fontsize=14, pad=15, fontweight='bold')
+            
+    elif focus_node_name: # Node name given but not found
+        ax3.text(0.5, 0.5, f"Focus node '{focus_node_name}' not found in hierarchy.", ha='center', va='center', fontsize=12, color='red')
+        ax3.set_title(f"Panel 3: Invalid Focus Node", fontsize=14, pad=15, fontweight='bold')
+    else: # No focus node provided
+        ax3.text(0.5, 0.5, "Panel 3: No focus node selected", ha='center', va='center', fontsize=12, color='gray')
+        ax3.set_title("Panel 3: Subtree Zoom (Select Node)", fontsize=14, pad=15, fontweight='bold')
+
+    ax3.set_xlabel(f"{projection_name} Dim 1", fontsize=12); ax3.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
+    ax3.set_aspect('equal', adjustable='box')
+    ax3.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
+    ax3.grid(True, linestyle='--', alpha=0.2, color='gray')
+    for spine in ax3.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
     
     # Adjust layout for better spacing
-    fig.tight_layout(pad=2.5)
+    fig.tight_layout(pad=3.0) # Increased padding
     
     # Save or show
     if save_path:
-        # Add timestamp and parameters to filename for tracking
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
+        model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title() # For metadata
         base, ext = os.path.splitext(save_path)
-        detailed_path = f"{base}_{model_name_clean}_{num_examples}ex_{timestamp}{ext}"
+        detailed_path = f"{base}_{model_name_clean}_3panel_{num_examples_display_p1p3}disp_{len(processed_all_detection_examples)}scan_{timestamp}{ext}"
         
-        # Ensure the directory exists
         save_dir = os.path.dirname(detailed_path)
-        os.makedirs(save_dir, exist_ok=True)
+        if save_dir: os.makedirs(save_dir, exist_ok=True)
         
-        # Calculate actual number of examples shown
-        num_actual_examples = len(detection_examples) if detection_examples else 0
-        
-        # Save with high resolution and metadata
-        print(f"Saving figure to {detailed_path}")
+        print(f"Saving 3-panel figure to {detailed_path}")
         metadata = {
-            'Title': f'UMAP visualization with {num_actual_examples} detection examples',
+            'Title': f'3-Panel UMAP visualization with {len(detection_examples_for_p1_display)} displayed examples (P1/P3)',
             'Author': 'Hierarchical Object Detection',
-            'Description': f'Model: {model_name}, Examples: {num_actual_examples}, Date: {timestamp}',
-            'Keywords': 'UMAP, embeddings, object detection, hierarchy'
+            'Description': f'Model: {model_name_stem}, Examples Scanned: {len(processed_all_detection_examples)}, P1/P3 Display: {len(detection_examples_for_p1_display)}, P2 Arrows: {len(panel2_detection_examples)}, Focus: {focus_node_name or "None"}, Date: {timestamp}',
+            'Keywords': 'UMAP, embeddings, object detection, hierarchy, multi-panel'
         }
-        fig.savefig(detailed_path, dpi=300, bbox_inches='tight', facecolor='white', 
-                   pad_inches=0.3, metadata=metadata)
-        print(f"Figure saved with {num_actual_examples} detection examples")
+        fig.savefig(detailed_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3, metadata=metadata)
+        print(f"Figure saved. Scanned {len(processed_all_detection_examples)} examples. Displayed {len(detection_examples_for_p1_display)} in P1/P3. Panel 2 shows {len(panel2_detection_examples)} arrows.")
     
     plt.show()
 
@@ -2478,8 +3827,12 @@ def parse_args():
     parser.add_argument('--model-path', required=True, help='Path to trained model checkpoint')
     parser.add_argument('--save-name', default='combined_umap_visualization.png', 
                        help='Name of the saved figure (default: combined_umap_visualization.png)')
-    parser.add_argument('--num-examples', type=int, default=20, 
-                       help='Number of detection examples to overlay (default: 20)')
+    # Changed from num-examples to num-examples-display
+    parser.add_argument('--num-examples-display', type=int, default=20, 
+                       help='Number of detection example thumbnails to display in Panel 1 and 3 (default: 20)')
+    # New argument for total examples to scan
+    parser.add_argument('--num-examples-scan', type=int, default=80,
+                       help='Total number of diverse examples to scan/collect for populating all panels (default: 80)')
     parser.add_argument('--random-state', type=int, default=42,
                        help='Random seed for UMAP (default: 42)')
     parser.add_argument('--min-score', type=float, default=0.3,
@@ -2488,6 +3841,14 @@ def parse_args():
                        help='IoU threshold for matching detected bboxes to ground truth (default: 0.5)')
     parser.add_argument('--use-mds', action='store_true',
                        help='Use MetricMDS instead of UMAP for better distance preservation (slower but more accurate)')
+    
+    # Three-panel visualization options
+    parser.add_argument('--three-panel', action='store_true',
+                       help='Create 3-panel visualization: (1) Full structure, (2) Hierarchical arrows, (3) Subtree focus')
+    parser.add_argument('--focus-node', type=str, default=None,
+                       help='Node name to focus on for subtree visualization (auto-selected if not provided)')
+    parser.add_argument('--panel-type', choices=['full', 'arrows', 'subtree'], default='full',
+                       help='Type of single panel to create (default: full)')
     
     args = parser.parse_args()
     return args
@@ -2506,11 +3867,13 @@ def main():
         model_path=args.model_path,
         config_path=args.config,
         save_path=save_path,
-        num_examples=args.num_examples,
+        num_examples_display_p1p3=args.num_examples_display,
+        num_examples_to_collect=args.num_examples_scan,
         random_state=args.random_state,
         min_score=args.min_score,
         iou_threshold=args.iou_threshold,
-        use_mds=args.use_mds
+        use_mds=args.use_mds,
+        focus_node_name=args.focus_node
     )
 
 
