@@ -129,9 +129,6 @@ def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
                         "TB001": {}, "TB2": {}
                     }
                 },
-                "Tiltrotor": {
-                    "V22": {}, "V280": {}
-                }
             },
             "Rotorcraft": {
                 "Attack Helicopters": {
@@ -145,6 +142,9 @@ def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
                         "Ka27": {}, "Z19": {}
                     }
                 }
+            },
+            "Tiltrotor": {
+                "V22": {}, "V280": {}
             }
         }
     }
