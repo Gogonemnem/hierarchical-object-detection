@@ -36,6 +36,12 @@ model = dict(
         ann_file=data_root + 'aircraft_test.json',
         cls_curvature=-1.0,
         share_cls_layer=True,
+        cls_config=dict(
+            use_bias=True,
+            use_temperature=True,
+            init_norm_upper_offset=0.5,
+            freeze_embeddings=False,
+        ),
         loss_cls=dict(
             type='HierarchicalFocalLoss',
             ann_file=data_root + 'aircraft_test.json',
