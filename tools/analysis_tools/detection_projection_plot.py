@@ -3507,7 +3507,248 @@ def plot_prototype_scatter(ax: Axes,
 # Main Plotting Function
 # -----------------------------------------------------------------------------
 
-def plot_combined_umap_with_detections(
+def _load_hierarchy_and_labels_from_config(cfg: Config) -> Tuple[Optional[HierarchyTree], Optional[List[str]]]:
+    """Loads hierarchy and class labels from the annotation file specified in the config."""
+    ann_file_path = None
+    try:
+        if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
+            ann_file = cfg.test_dataloader.dataset.ann_file
+            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg.test_dataloader.dataset, 'data_root') else ''
+            if data_root and not os.path.isabs(ann_file):
+                ann_file_path = os.path.join(data_root, ann_file)
+            else:
+                ann_file_path = ann_file
+        if ann_file_path is None:  # Fallback
+            # Consider making this fallback more robust or configurable if needed
+            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader.dataset, 'data_root') else 'data/aircraft'
+            ann_file_path = os.path.join(data_root, 'aircraft_test.json')  # Default path
+            print(f"Warning: Annotation file path not found in config, using fallback: {ann_file_path}")
+
+        if not os.path.exists(ann_file_path):
+            print(f"Error: Annotation file not found at {ann_file_path}")
+            return None, None
+
+        ann_data = load(ann_file_path)
+        if not isinstance(ann_data, dict) or "categories" not in ann_data or "taxonomy" not in ann_data:
+            print(f"Error: Annotation file {ann_file_path} is missing 'categories' or 'taxonomy'.")
+            return None, None
+
+        categories_from_ann = ann_data["categories"]
+        labels_from_ann = [cat["name"] for cat in categories_from_ann]
+        hierarchy = HierarchyTree(ann_data["taxonomy"])
+        print(f"Successfully loaded hierarchy and labels from {ann_file_path}")
+        return hierarchy, labels_from_ann
+    except Exception as e:
+        print(f"Error loading hierarchy and labels from {ann_file_path or 'unknown path'}: {e}")
+        return None, None
+
+
+def _style_panel_axes(ax: Axes, title: str, projection_name: str):
+    """Applies common styling to a panel's axes."""
+    ax.set_facecolor('#f9f9f9')
+    ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
+    ax.set_xlabel(f"{projection_name} Dim 1", fontsize=12)
+    ax.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
+    ax.set_aspect('equal', adjustable='box')
+    ax.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
+    ax.grid(True, linestyle='--', alpha=0.2, color='gray')
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_color('#888888')
+        spine.set_linewidth(0.8)
+
+
+def _plot_panel1_full_structure(
+    ax: Axes,
+    hierarchy: HierarchyTree,
+    proj_node_coords: Dict[str, np.ndarray],
+    proj_labels: List[str],
+    hue_map: Dict[str, float],
+    depth_cmap, 
+    processed_all_detection_examples: List[Dict[str, Any]],
+    num_examples_display_p1p3: int,
+    projection_name: str,
+    model_name_stem: str
+) -> Tuple[Set[str], List[str], Optional[np.ndarray], Optional[np.ndarray], List[Any], List[Any]]: # Added return type hint
+    """Populates Panel 1 with the full structure visualization."""
+    print("Populating Panel 1: Full Structure")
+
+    plotted_nodes_p1 = set(proj_node_coords.keys())
+    attrs_p1_list = calculate_visual_attributes(
+        hierarchy, plotted_nodes_p1, proj_node_coords, proj_labels, hue_map, depth_cmap
+    )
+    # Ensure attrs_p1_list returns enough values or handle None if calculate_visual_attributes can return less
+    if len(attrs_p1_list) == 7:
+        filtered_labels_p1, filtered_coords_p1, marker_sizes_p1, \
+        fill_colors_p1, edge_colors_p1, _, _ = attrs_p1_list
+    else: # Fallback if calculate_visual_attributes returned unexpected number of items
+        print("Warning: calculate_visual_attributes did not return expected number of items for Panel 1.")
+        # Initialize to safe defaults to avoid errors, though plotting might be incomplete
+        filtered_labels_p1 = []
+        filtered_coords_p1 = np.array([])
+        marker_sizes_p1 = np.array([])
+        fill_colors_p1 = []
+        edge_colors_p1 = []
+
+    if filtered_labels_p1: 
+        plot_convex_hulls(ax, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
+        plot_taxonomy_skeleton(ax, plotted_nodes_p1, hierarchy, proj_node_coords)
+        plot_prototype_scatter(ax, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
+    else:
+        ax.text(0.5, 0.5, "No prototype data for Panel 1", ha='center', va='center')
+
+    examples_with_coords_p1 = [ex for ex in processed_all_detection_examples if 'umap_coords' in ex]
+    detection_examples_for_p1_display = _select_balanced_subset(examples_with_coords_p1, num_examples_display_p1p3)
+    
+    if detection_examples_for_p1_display:
+        print(f"Panel 1: Displaying {len(detection_examples_for_p1_display)} balanced example thumbnails.")
+        p1_display_counts = [0]*6 # Assuming 6 fallback levels
+        for ex_p1 in detection_examples_for_p1_display: 
+            if 'fallback_level' in ex_p1 and 0 <= ex_p1['fallback_level'] < 6:
+                p1_display_counts[ex_p1['fallback_level']] +=1
+        print(f"  Panel 1 display distribution: {p1_display_counts}")
+        overlay_detection_thumbnails(ax, detection_examples_for_p1_display, disable_layout_adjustment=False)
+    
+    add_detection_border_legend(ax)
+    panel1_title = f"Panel 1: Full Structure ({projection_name})\n{model_name_stem}"
+    _style_panel_axes(ax, panel1_title, projection_name)
+
+    return plotted_nodes_p1, filtered_labels_p1, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1
+
+
+def _plot_panel2_hierarchical_retreat(
+    ax: Axes,
+    hierarchy: HierarchyTree,
+    proj_node_coords: Dict[str, np.ndarray],
+    hue_map: Dict[str, float],
+    processed_all_detection_examples: List[Dict[str, Any]],
+    projection_name: str,
+    # Data from Panel 1 for base plot
+    plotted_nodes_p1: Set[str],
+    filtered_labels_p1: List[str],
+    filtered_coords_p1: Optional[np.ndarray],
+    marker_sizes_p1: Optional[np.ndarray],
+    fill_colors_p1: List[Any],
+    edge_colors_p1: List[Any]
+):
+    """Populates Panel 2 with the hierarchical retreat visualization."""
+    print("Populating Panel 2: Parent/Ancestor Fallbacks")
+
+    panel2_fallback_levels = {1, 2} # Focus on Parent and Grandparent
+    panel2_detection_examples = [
+        ex for ex in processed_all_detection_examples if ex.get('fallback_level') in panel2_fallback_levels and 'umap_coords' in ex
+    ]
+    print(f"Panel 2: Found {len(panel2_detection_examples)} examples (from pool of {len(processed_all_detection_examples)}) with fallback levels {panel2_fallback_levels}.")
+
+    if filtered_labels_p1 and filtered_coords_p1 is not None and marker_sizes_p1 is not None and filtered_coords_p1.size > 0:
+        plot_taxonomy_skeleton(ax, plotted_nodes_p1, hierarchy, proj_node_coords)
+        plot_convex_hulls(ax, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
+        plot_prototype_scatter(ax, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
+    else:
+        ax.text(0.5, 0.5, "No prototype data for Panel 2", ha='center', va='center')
+
+    if panel2_detection_examples:
+        print(f"Panel 2: Displaying {len(panel2_detection_examples)} example thumbnails (layout adjustment disabled) and arrows.")
+        overlay_detection_thumbnails(ax, panel2_detection_examples, disable_layout_adjustment=True)
+        plot_fallback_arrows(ax, panel2_detection_examples, proj_node_coords)
+    else:
+        print(f"No detection examples to display for Panel 2 (fallback levels {panel2_fallback_levels}).")
+
+    add_detection_border_legend(ax) 
+    panel2_title = "Panel 2: Hierarchical Retreat\n(Parent, Grandparent Fallbacks)" # Updated title slightly
+    _style_panel_axes(ax, panel2_title, projection_name)
+
+
+def _plot_panel3_subtree_zoom(
+    ax: Axes,
+    hierarchy: HierarchyTree,
+    # Full projection data, will be filtered inside
+    full_proj_node_coords: Dict[str, np.ndarray], 
+    full_proj_labels: List[str], 
+    hue_map: Dict[str, float],
+    depth_cmap, # Consider adding type hint: matplotlib.colors.Colormap
+    processed_all_detection_examples: List[Dict[str, Any]],
+    num_examples_display_p1p3: int,
+    projection_name: str,
+    focus_node_name: Optional[str]
+):
+    """Populates Panel 3 with the focused subtree visualization."""
+    print(f"Populating Panel 3: Subtree Zoom (Focus: {focus_node_name})")
+    panel3_title = "" # Default title
+
+    if focus_node_name and hierarchy.class_to_node.get(focus_node_name):
+        focus_node_obj = hierarchy.class_to_node.get(focus_node_name)
+        # Get descendants, ensure focus node itself is included if it's a leaf or desired
+        subtree_node_names = set(focus_node_obj.descendants())
+        if focus_node_name not in subtree_node_names: # Ensure focus node is part of its own "subtree"
+             subtree_node_names.add(focus_node_name)
+
+        # Filter prototype coordinates for the subtree
+        sub_proj_node_coords = {
+            name: coords for name, coords in full_proj_node_coords.items() 
+            if name in subtree_node_names
+        }
+        
+        # Filter detection examples whose predicted node is in the subtree
+        sub_detection_examples_all_in_subtree = [
+            ex for ex in processed_all_detection_examples 
+            if ex.get('pred_node') in subtree_node_names and 'umap_coords' in ex
+        ]
+        sub_detection_examples_for_p3_display = _select_balanced_subset(
+            sub_detection_examples_all_in_subtree, num_examples_display_p1p3
+        )
+        
+        plotted_nodes_p3 = set(sub_proj_node_coords.keys())
+        panel3_title = f"Panel 3: Subtree '{focus_node_name}'"
+        
+        if plotted_nodes_p3:
+            # Pass full_proj_labels, calculate_visual_attributes will filter internally
+            attrs_p3_list = calculate_visual_attributes(
+                hierarchy, plotted_nodes_p3, sub_proj_node_coords, 
+                full_proj_labels, hue_map, depth_cmap
+            )
+            
+            if len(attrs_p3_list) == 7:
+                filtered_labels_p3, filtered_coords_p3, marker_sizes_p3, \
+                fill_colors_p3, edge_colors_p3, _, _ = attrs_p3_list
+            else:
+                print(f"Warning: calculate_visual_attributes returned unexpected items for Panel 3.")
+                filtered_labels_p3 = [] # Safe default
+                filtered_coords_p3 = np.array([])
+                marker_sizes_p3 = np.array([])
+                fill_colors_p3 = []
+                edge_colors_p3 = []
+
+            if filtered_labels_p3 and filtered_coords_p3.size > 0:
+                plot_convex_hulls(ax, plotted_nodes_p3, hierarchy, sub_proj_node_coords, hue_map)
+                plot_taxonomy_skeleton(ax, plotted_nodes_p3, hierarchy, sub_proj_node_coords)
+                plot_prototype_scatter(ax, filtered_coords_p3, marker_sizes_p3, fill_colors_p3, edge_colors_p3, filtered_labels_p3)
+            else:
+                ax.text(0.5, 0.5, f"No prototype data for subtree '{focus_node_name}'", ha='center', va='center')
+
+            if sub_detection_examples_for_p3_display:
+                print(f"Panel 3: Displaying {len(sub_detection_examples_for_p3_display)} balanced example thumbnails for subtree.")
+                p3_display_counts = [0]*6
+                for ex_p3 in sub_detection_examples_for_p3_display: 
+                    if 'fallback_level' in ex_p3 and 0 <= ex_p3['fallback_level'] < 6:
+                         p3_display_counts[ex_p3['fallback_level']] +=1
+                print(f"  Panel 3 display distribution: {p3_display_counts}")
+                overlay_detection_thumbnails(ax, sub_detection_examples_for_p3_display, disable_layout_adjustment=False)
+        else: # plotted_nodes_p3 is empty
+            ax.text(0.5, 0.5, f"No data to display for focus node '{focus_node_name}'", ha='center', va='center', fontsize=12, color='gray')
+            panel3_title = f"Panel 3: Subtree '{focus_node_name}' (Empty)"
+
+    elif focus_node_name: # Node name given but not found in hierarchy
+        ax.text(0.5, 0.5, f"Focus node '{focus_node_name}' not found in hierarchy.", ha='center', va='center', fontsize=12, color='red')
+        panel3_title = "Panel 3: Invalid Focus Node"
+    else: # No focus node provided
+        ax.text(0.5, 0.5, "Panel 3: No focus node selected", ha='center', va='center', fontsize=12, color='gray')
+        panel3_title = "Panel 3: Subtree Zoom (Select Node)"
+
+    _style_panel_axes(ax, panel3_title, projection_name)
+
+
+def generate_detection_projection_plot(
     model_path: str, 
     config_path: str,
     save_path: Optional[str] = None,
@@ -3536,52 +3777,19 @@ def plot_combined_umap_with_detections(
     model = init_detector(config_path, model_path, device='cuda') # Ensure device is appropriate
 
     print("Loading prototype embeddings and hierarchy for UMAP fitting...")
-    # This part is largely the same as your existing function:
     # It calls load_embeddings_and_umap, extract_detection_examples_with_hooks,
     # and prepares all necessary data for the full plot.
-
-    # --- Existing data loading and UMAP projection logic ---
-    # (Copied and adapted from your existing plot_combined_umap_with_detections)
-    
-    # Get prototype embeddings directly from the model for consistency
-    # This logic might need to be aligned with how get_target_classifier works if you use that
     try:
-        last_branch_idx = get_last_classification_branch_index(model)
-        # Assuming the relevant prototypes are in the second-to-last branch if two-stage, else last.
-        # This needs to be consistent with how query embeddings are hooked.
-        # For simplicity, let's assume get_target_classifier helps here or direct access:
         target_classifier_module = get_target_classifier(model) # You might need to define/refine this
         prototype_embeddings_from_model = target_classifier_module.prototypes.detach().cpu().numpy()
     except Exception as e:
         print(f"Error getting prototype_embeddings_from_model: {e}. Check model structure and get_target_classifier.")
         return
 
-    # Load hierarchy and labels from annotation file (as in load_embeddings_and_umap)
-    # This part is crucial and should be robust
-    ann_file_path = None
-    try:
-        if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
-            ann_file = cfg.test_dataloader.dataset.ann_file
-            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg.test_dataloader.dataset, 'data_root') else ''
-            if data_root and not os.path.isabs(ann_file):
-                ann_file_path = os.path.join(data_root, ann_file)
-            else:
-                ann_file_path = ann_file
-        if ann_file_path is None: # Fallback
-            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader.dataset, 'data_root') else 'data/aircraft'
-            ann_file_path = os.path.join(data_root, 'aircraft_test.json') # Default path
-        
-        ann_data = load(ann_file_path)
-        if not isinstance(ann_data, dict) or "categories" not in ann_data or "taxonomy" not in ann_data:
-            print(f"Error: Annotation file {ann_file_path} is missing 'categories' or 'taxonomy'.")
-            return
-        
-        categories_from_ann = ann_data["categories"]
-        labels_from_ann = [cat["name"] for cat in categories_from_ann] # These are usually leaf node names
-        hierarchy = HierarchyTree(ann_data["taxonomy"])
-        # Note: load_embeddings_and_umap also loads hierarchy and labels. Consider streamlining.
-    except Exception as e:
-        print(f"Error loading annotation data from {ann_file_path}: {e}")
+    # Load hierarchy and labels using the new helper function
+    hierarchy, labels_from_ann = _load_hierarchy_and_labels_from_config(cfg)
+    if hierarchy is None or labels_from_ann is None:
+        print("Failed to load hierarchy or labels. Exiting.")
         return
 
     print("Extracting detection examples with actual query embeddings using hooks...")
@@ -3655,140 +3863,54 @@ def plot_combined_umap_with_detections(
     plt.style.use('seaborn-v0_8-whitegrid')
     fig.patch.set_facecolor('white')
 
-    # === Panel 1: Full Structure ===
-    ax1.set_facecolor('#f9f9f9')
-    print("Populating Panel 1: Full Structure")
-    
-    plotted_nodes_p1 = set(proj_node_coords.keys()) 
-    attrs_p1_list = calculate_visual_attributes(
-        hierarchy, plotted_nodes_p1, proj_node_coords, proj_labels, hue_map, depth_cmap
-    )
-    filtered_labels_p1, filtered_coords_p1, marker_sizes_p1, \
-    fill_colors_p1, edge_colors_p1, _, _ = attrs_p1_list
-
-    if filtered_labels_p1:
-        plot_convex_hulls(ax1, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
-        plot_taxonomy_skeleton(ax1, plotted_nodes_p1, hierarchy, proj_node_coords)
-        plot_prototype_scatter(ax1, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
-    else:
-        ax1.text(0.5, 0.5, "No prototype data for Panel 1", ha='center', va='center')
-
-    # Select a balanced subset for display in Panel 1
-    examples_with_coords_p1 = [ex for ex in processed_all_detection_examples if 'umap_coords' in ex]
-    detection_examples_for_p1_display = _select_balanced_subset(examples_with_coords_p1, num_examples_display_p1p3)
-    
-    if detection_examples_for_p1_display:
-        print(f"Panel 1: Displaying {len(detection_examples_for_p1_display)} balanced example thumbnails.")
-        # Log the distribution for Panel 1 display
-        p1_display_counts = [0]*6
-        for ex_p1 in detection_examples_for_p1_display: p1_display_counts[ex_p1['fallback_level']] +=1
-        print(f"  Panel 1 display distribution: {p1_display_counts}")
-
-        overlay_detection_thumbnails(ax1, detection_examples_for_p1_display, disable_layout_adjustment=False)
-    
-    add_detection_border_legend(ax1)
     projection_name = "MetricMDS" if use_mds else "UMAP"
     model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title()
-    ax1.set_title(f"Panel 1: Full Structure ({projection_name})\n{model_name_stem}", fontsize=14, pad=15, fontweight='bold')
-    ax1.set_xlabel(f"{projection_name} Dim 1", fontsize=12); ax1.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
-    ax1.set_aspect('equal', adjustable='box')
-    ax1.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
-    ax1.grid(True, linestyle='--', alpha=0.2, color='gray')
-    for spine in ax1.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
+
+    # === Panel 1: Full Structure ===
+    plotted_nodes_p1, filtered_labels_p1, filtered_coords_p1, \
+    marker_sizes_p1, fill_colors_p1, edge_colors_p1 = _plot_panel1_full_structure(
+        ax1,
+        hierarchy,
+        proj_node_coords,
+        proj_labels,
+        hue_map,
+        depth_cmap,
+        processed_all_detection_examples,
+        num_examples_display_p1p3,
+        projection_name,
+        model_name_stem
+    )
 
     # === Panel 2: Parent + Ancestor Fallbacks ===
-    ax2.set_facecolor('#f9f9f9')
-    print("Populating Panel 2: Parent/Ancestor Fallbacks")
-
-    panel2_fallback_levels = {1, 2} # Focus on Parent and Grandparent
-    # Filter from the larger pool of all_processed_detection_examples
-    panel2_detection_examples = [
-        ex for ex in processed_all_detection_examples if ex.get('fallback_level') in panel2_fallback_levels and 'umap_coords' in ex
-    ]
-    print(f"Panel 2: Found {len(panel2_detection_examples)} examples (from pool of {len(processed_all_detection_examples)}) with fallback levels {panel2_fallback_levels}.")
-
-    if filtered_labels_p1: 
-        plot_taxonomy_skeleton(ax2, plotted_nodes_p1, hierarchy, proj_node_coords)
-        plot_convex_hulls(ax2, plotted_nodes_p1, hierarchy, proj_node_coords, hue_map)
-        plot_prototype_scatter(ax2, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1, filtered_labels_p1)
-    else:
-        ax2.text(0.5, 0.5, "No prototype data for Panel 2", ha='center', va='center')
-
-    if panel2_detection_examples:
-        # For Panel 2, we might want to show all arrows, but thumbnails could be very dense.
-        # The disable_layout_adjustment=True will plot thumbnails at exact UMAP coords, leading to overlap.
-        # This is acceptable if the focus is on the arrows.
-        print(f"Panel 2: Displaying {len(panel2_detection_examples)} example thumbnails (layout adjustment disabled) and arrows.")
-        overlay_detection_thumbnails(ax2, panel2_detection_examples, disable_layout_adjustment=True)
-        plot_fallback_arrows(ax2, panel2_detection_examples, proj_node_coords)
-    else:
-        print(f"No detection examples to display for Panel 2 (fallback levels {panel2_fallback_levels}).")
-
-    add_detection_border_legend(ax2) 
-    ax2.set_title("Panel 2: Hierarchical Retreat\n(Exact, Parent, Grandparent Fallbacks)", fontsize=14, pad=15, fontweight='bold')
-    ax2.set_xlabel(f"{projection_name} Dim 1", fontsize=12)
-    ax2.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
-    ax2.set_aspect('equal', adjustable='box')
-    ax2.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
-    ax2.grid(True, linestyle='--', alpha=0.2, color='gray')
-    for spine in ax2.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
+    _plot_panel2_hierarchical_retreat(
+        ax2,
+        hierarchy,
+        proj_node_coords,
+        hue_map,
+        processed_all_detection_examples,
+        projection_name,
+        plotted_nodes_p1,
+        filtered_labels_p1,
+        filtered_coords_p1,
+        marker_sizes_p1,
+        fill_colors_p1,
+        edge_colors_p1
+    )
 
     # === Panel 3: Interactive Subtree Zoom ===
-    ax3.set_facecolor('#f9f9f9')
-    print(f"Populating Panel 3: Subtree Zoom (Focus: {focus_node_name})")
-    if focus_node_name and hierarchy.class_to_node.get(focus_node_name):
-        focus_node_obj = hierarchy.class_to_node.get(focus_node_name)
-        subtree_node_names = set(focus_node_obj.descendants())
-        sub_proj_node_coords = {name: coords for name, coords in proj_node_coords.items() if name in subtree_node_names}
-        
-        # Filter from all_processed_detection_examples, then take a display subset
-        sub_detection_examples_all_in_subtree = [
-            ex for ex in processed_all_detection_examples 
-            if ex.get('pred_node') in subtree_node_names and 'umap_coords' in ex
-        ]
-        # Select a balanced subset for display in Panel 3
-        sub_detection_examples_for_p3_display = _select_balanced_subset(sub_detection_examples_all_in_subtree, num_examples_display_p1p3)
-        
-        plotted_nodes_p3 = set(sub_proj_node_coords.keys())
-        
-        if plotted_nodes_p3:
-            attrs_p3_list = calculate_visual_attributes(
-                hierarchy, plotted_nodes_p3, sub_proj_node_coords, proj_labels, hue_map, depth_cmap
-            )
-            filtered_labels_p3, filtered_coords_p3, marker_sizes_p3, \
-            fill_colors_p3, edge_colors_p3, _, _ = attrs_p3_list
+    _plot_panel3_subtree_zoom(
+        ax3,
+        hierarchy, # This is hierarchy_from_load
+        proj_node_coords, # Pass the full proj_node_coords
+        proj_labels,      # Pass the full proj_labels
+        hue_map,
+        depth_cmap,
+        processed_all_detection_examples,
+        num_examples_display_p1p3,
+        projection_name,
+        focus_node_name
+    )
 
-            if filtered_labels_p3:
-                plot_convex_hulls(ax3, plotted_nodes_p3, hierarchy, sub_proj_node_coords, hue_map)
-                plot_taxonomy_skeleton(ax3, plotted_nodes_p3, hierarchy, sub_proj_node_coords)
-                plot_prototype_scatter(ax3, filtered_coords_p3, marker_sizes_p3, fill_colors_p3, edge_colors_p3, filtered_labels_p3)
-            else:
-                ax3.text(0.5, 0.5, f"No prototype data for subtree '{focus_node_name}'", ha='center', va='center')
-
-            if sub_detection_examples_for_p3_display:
-                print(f"Panel 3: Displaying {len(sub_detection_examples_for_p3_display)} balanced example thumbnails for subtree.")
-                # Log the distribution for Panel 3 display
-                p3_display_counts = [0]*6
-                for ex_p3 in sub_detection_examples_for_p3_display: p3_display_counts[ex_p3['fallback_level']] +=1
-                print(f"  Panel 3 display distribution: {p3_display_counts}")
-                overlay_detection_thumbnails(ax3, sub_detection_examples_for_p3_display, disable_layout_adjustment=False)
-        else:
-            ax3.text(0.5, 0.5, f"No data to display for focus node '{focus_node_name}'", ha='center', va='center', fontsize=12, color='gray')
-            ax3.set_title(f"Panel 3: Subtree '{focus_node_name}' (Empty)", fontsize=14, pad=15, fontweight='bold')
-            
-    elif focus_node_name: # Node name given but not found
-        ax3.text(0.5, 0.5, f"Focus node '{focus_node_name}' not found in hierarchy.", ha='center', va='center', fontsize=12, color='red')
-        ax3.set_title(f"Panel 3: Invalid Focus Node", fontsize=14, pad=15, fontweight='bold')
-    else: # No focus node provided
-        ax3.text(0.5, 0.5, "Panel 3: No focus node selected", ha='center', va='center', fontsize=12, color='gray')
-        ax3.set_title("Panel 3: Subtree Zoom (Select Node)", fontsize=14, pad=15, fontweight='bold')
-
-    ax3.set_xlabel(f"{projection_name} Dim 1", fontsize=12); ax3.set_ylabel(f"{projection_name} Dim 2", fontsize=12)
-    ax3.set_aspect('equal', adjustable='box')
-    ax3.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
-    ax3.grid(True, linestyle='--', alpha=0.2, color='gray')
-    for spine in ax3.spines.values(): spine.set_visible(True); spine.set_color('#888888'); spine.set_linewidth(0.8)
-    
     # Adjust layout for better spacing
     fig.tight_layout(pad=3.0) # Increased padding
     
@@ -3796,7 +3918,7 @@ def plot_combined_umap_with_detections(
     if save_path:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
-        model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title() # For metadata
+        model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title()
         base, ext = os.path.splitext(save_path)
         detailed_path = f"{base}_{model_name_clean}_3panel_{num_examples_display_p1p3}disp_{len(processed_all_detection_examples)}scan_{timestamp}{ext}"
         
@@ -3804,14 +3926,16 @@ def plot_combined_umap_with_detections(
         if save_dir: os.makedirs(save_dir, exist_ok=True)
         
         print(f"Saving 3-panel figure to {detailed_path}")
+        # Adjusted metadata: Removed P2 Arrows count as it's no longer directly available here
         metadata = {
-            'Title': f'3-Panel UMAP visualization with {len(detection_examples_for_p1_display)} displayed examples (P1/P3)',
+            'Title': f'3-Panel UMAP visualization with {num_examples_display_p1p3} displayed examples (P1/P3)',
             'Author': 'Hierarchical Object Detection',
-            'Description': f'Model: {model_name_stem}, Examples Scanned: {len(processed_all_detection_examples)}, P1/P3 Display: {len(detection_examples_for_p1_display)}, P2 Arrows: {len(panel2_detection_examples)}, Focus: {focus_node_name or "None"}, Date: {timestamp}',
+            'Description': f'Model: {model_name_stem}, Examples Scanned: {len(processed_all_detection_examples)}, P1/P3 Display: {num_examples_display_p1p3}, Focus: {focus_node_name or "None"}, Date: {timestamp}',
             'Keywords': 'UMAP, embeddings, object detection, hierarchy, multi-panel'
         }
         fig.savefig(detailed_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3, metadata=metadata)
-        print(f"Figure saved. Scanned {len(processed_all_detection_examples)} examples. Displayed {len(detection_examples_for_p1_display)} in P1/P3. Panel 2 shows {len(panel2_detection_examples)} arrows.")
+        # Adjusted print statement
+        print(f"Figure saved. Scanned {len(processed_all_detection_examples)} examples. Displayed {num_examples_display_p1p3} in P1/P3.")
     
     plt.show()
 
@@ -3863,7 +3987,7 @@ def main():
     
     save_path = os.path.join(args.save_dir, args.save_name)
     
-    plot_combined_umap_with_detections(
+    generate_detection_projection_plot(
         model_path=args.model_path,
         config_path=args.config,
         save_path=save_path,
