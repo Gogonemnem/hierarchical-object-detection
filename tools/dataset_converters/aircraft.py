@@ -231,24 +231,24 @@ def main():
         description='Convert aircraft CSV annotations to COCO JSON format'
     )
     parser.add_argument(
-        '--csv_file',
+        '--csv-file',
         type=str,
         required=True,
         help='Path to the CSV file (e.g., labels_with_split.csv)'
     )
     parser.add_argument(
-        '--out_dir',
+        '--out-dir',
         type=str,
         required=True,
         help='Directory to save the output COCO JSON files'
     )
     parser.add_argument(
-        '--subtract_one',
+        '--subtract-one',
         action='store_true',
         help='Subtract 1 from bounding box coordinates (default: False)'
     )
     parser.add_argument(
-        '--use_all_nodes',
+        '--use-all-nodes',
         action='store_true',
         help='Include every intermediate taxonomy node as its own class'
     )
