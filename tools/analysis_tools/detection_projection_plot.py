@@ -93,85 +93,6 @@ def safe_load(*args, **kwargs):
 
 torch.load = safe_load
 
-
-# -----------------------------------------------------------------------------
-# Image Processing Utilities
-# -----------------------------------------------------------------------------
-
-def crop_image_from_bbox(image_path: str, bbox: np.ndarray, expand_factor: float = 1.2) -> Optional[np.ndarray]:
-    """
-    Unified image cropping function with padding and error handling.
-    
-    Args:
-        image_path: Path to the image file
-        bbox: Bounding box [x1, y1, x2, y2]
-        expand_factor: Factor to expand the crop region (default: 1.2)
-        
-    Returns:
-        Optional[np.ndarray]: Cropped and resized image, or None if extraction fails
-    """
-    try:
-        # Load image
-        img = cv2.imread(image_path)
-        if img is None:
-            return None
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Extract and expand bounding box
-        x1, y1, x2, y2 = bbox.astype(int)
-        
-        # Calculate expanded dimensions
-        width = x2 - x1
-        height = y2 - y1
-        expand_w = int((expand_factor - 1) * width / 2)
-        expand_h = int((expand_factor - 1) * height / 2)
-        
-        # Apply expansion with image boundary constraints
-        x1_exp = max(0, x1 - expand_w)
-        y1_exp = max(0, y1 - expand_h)
-        x2_exp = min(img_rgb.shape[1], x2 + expand_w)
-        y2_exp = min(img_rgb.shape[0], y2 + expand_h)
-        
-        # Validate expanded region
-        if x2_exp <= x1_exp or y2_exp <= y1_exp:
-            return None
-            
-        # Extract crop
-        crop = img_rgb[y1_exp:y2_exp, x1_exp:x2_exp]
-        
-        # Add padding if crop is too small
-        if crop.shape[0] < 32 or crop.shape[1] < 32:
-            pad_h = max(0, 32 - crop.shape[0])
-            pad_w = max(0, 32 - crop.shape[1])
-            crop = np.pad(crop, ((pad_h//2, pad_h-pad_h//2), (pad_w//2, pad_w-pad_w//2), (0, 0)), 
-                         mode='constant', constant_values=128)
-        
-        return crop
-        
-    except Exception as e:
-        print(f"Error cropping image from {image_path}: {e}")
-        return None
-
-
-def resize_image_for_display(img: np.ndarray, target_size: int = 96) -> np.ndarray:
-    """
-    Resize image for display while maintaining aspect ratio.
-    
-    Args:
-        img: Input image array
-        target_size: Target size for the larger dimension
-        
-    Returns:
-        np.ndarray: Resized image
-    """
-    try:
-        return cv2.resize(img, (target_size, target_size))
-    except Exception as e:
-        print(f"Error resizing image: {e}")
-        # Return a placeholder if resize fails
-        return np.full((target_size, target_size, 3), 128, dtype=np.uint8)
-
-
 # =============================================================================
 # CONFIGURATION AND DATA STRUCTURES
 # =============================================================================
@@ -240,228 +161,6 @@ class ValidationResult:
                     pred_name = res.get('predicted_class_name', f"Idx {res['prediction']}")
                     nn_name = res.get('nn_class_name', f"Idx {res['nearest_neighbor']}")
                     print(f"  - Query {res['query_idx']}: Model Predicted: '{pred_name}', but NN was: '{nn_name}' (Dist: {res.get('distance', 'N/A'):.4f})")
-# =============================================================================
-# VISUALIZATION MANAGER CLASS
-# =============================================================================
-
-@dataclass
-class VisualizationManager:
-    """
-    Professional visualization manager for hierarchical UMAP plots.
-    
-    Provides consistent styling, component organization, and publication-quality 
-    formatting for all visualization elements including prototypes, detection 
-    overlays, legends, and axes.
-    """
-    figure_size: Tuple[int, int] = (20, 18)
-    dpi: int = 120
-    background_color: str = '#f9f9f9'
-    grid_alpha: float = 0.2
-    spine_color: str = '#888888'
-    spine_width: float = 0.8
-    
-    # Detection border styling
-    border_width: int = 6
-    outline_color: Tuple[int, int, int] = (40, 40, 40)
-    padding_color: Tuple[int, int, int] = (255, 255, 255)
-    final_outline_color: Tuple[int, int, int] = (50, 50, 50)
-    
-    # Text styling
-    title_fontsize: int = 16
-    label_fontsize: int = 14
-    legend_fontsize: int = 9
-    legend_title_fontsize: int = 11
-    text_overlay_fontsize: float = 8.5
-    
-    def create_figure(self) -> Tuple[Figure, Axes]:
-        """Create a professionally styled figure and axes."""
-        plt.style.use('seaborn-v0_8-whitegrid')
-        
-        fig, ax = plt.subplots(figsize=self.figure_size, dpi=self.dpi)
-        
-        # Professional background
-        ax.set_facecolor(self.background_color)
-        fig.patch.set_facecolor('white')
-        
-        return fig, ax
-    
-    def style_axes(self, ax: Axes, projection_name: str):
-        """Apply professional styling to axes."""
-        # Set labels with proper spacing
-        ax.set_xlabel(f"{projection_name} Dimension 1", 
-                     fontsize=self.label_fontsize, labelpad=15)
-        ax.set_ylabel(f"{projection_name} Dimension 2", 
-                     fontsize=self.label_fontsize, labelpad=15)
-        
-        # Maintain aspect ratio
-        ax.set_aspect('equal', adjustable='box')
-        
-        # Clean tick styling
-        ax.tick_params(axis='both', which='both', bottom=False, top=False, 
-                      left=False, right=False, labelbottom=False, labelleft=False)
-        
-        # Subtle grid
-        ax.grid(True, linestyle='--', alpha=self.grid_alpha, color='gray')
-        
-        # Professional borders
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_color(self.spine_color)
-            spine.set_linewidth(self.spine_width)
-    
-    def set_title(self, ax: Axes, model_name: str, projection_name: str):
-        """Set a professional title with proper formatting."""
-        # Clean up model name
-        clean_name = pathlib.Path(model_name).stem.replace('_', ' ').title()
-        if len(clean_name) > 30:
-            clean_name = clean_name[:27] + "..."
-        
-        title = (f"{projection_name} Visualization of Prototype Embeddings with Detection Examples\n"
-                f"GT-Prediction Relationship Analysis | {clean_name}")
-        
-        ax.set_title(title, fontsize=self.title_fontsize, pad=20, fontweight='bold')
-    
-    def create_detection_legend(self, ax: Axes):
-        """Create a professional legend for detection border colors."""
-        import matplotlib.patches as patches
-        
-        legend_items = [
-            (0, 'Exact Match (correct prediction)', '#2E8B57'),
-            (1, 'Parent (prediction too general)', '#66CDAA'),
-            (2, 'Grandparent (prediction very general)', '#90EE90'),
-            (3, 'Sibling (same parent class)', '#87CEEB'),
-            (4, 'Cousin (related class)', '#DDA0DD'),
-            (5, 'Off-branch (unrelated class)', '#DC143C')
-        ]
-        
-        # Create professional legend elements
-        legend_elements = []
-        for _level, label, color in legend_items:
-            rect = patches.Rectangle((0, 0), 1, 1, linewidth=3, 
-                                   edgecolor=color, facecolor='white', alpha=0.95)
-            legend_elements.append((rect, label))
-        
-        # Add styled legend
-        legend = ax.legend([elem[0] for elem in legend_elements], 
-                          [elem[1] for elem in legend_elements],
-                          loc='upper left', bbox_to_anchor=(0.01, 0.99), 
-                          fontsize=self.legend_fontsize, 
-                          title="GT-Prediction Relationships", 
-                          title_fontsize=self.legend_title_fontsize,
-                          frameon=True, fancybox=True, shadow=True, 
-                          framealpha=0.95, ncol=1)
-        
-        # Professional legend styling
-        legend.get_frame().set_facecolor('#fcfcfc')
-        legend.get_frame().set_edgecolor('#888888')
-        legend.get_frame().set_linewidth(1.0)
-        legend.get_title().set_fontweight('bold')
-    
-    def add_professional_border(self, img: np.ndarray, encoding: Dict[str, Any]) -> np.ndarray:
-        """Add publication-quality colored border to detection images."""
-        color = encoding['color']
-        
-        # Convert color to BGR for OpenCV
-        if isinstance(color, str):
-            color_rgb = mcolors.to_rgb(color)
-            color_bgr = [int(c * 255) for c in color_rgb[::-1]]
-        else:
-            color_bgr = color
-        
-        # Professional multi-layer border
-        # 1. Thin dark outline
-        img_outlined = cv2.copyMakeBorder(img, 1, 1, 1, 1, 
-                                        cv2.BORDER_CONSTANT, value=self.outline_color)
-        
-        # 2. White padding for separation
-        img_padded = cv2.copyMakeBorder(img_outlined, 2, 2, 2, 2, 
-                                       cv2.BORDER_CONSTANT, value=self.padding_color)
-        
-        # 3. Main colored border
-        img_bordered = cv2.copyMakeBorder(img_padded, 
-                                         self.border_width, self.border_width, 
-                                         self.border_width, self.border_width,
-                                         cv2.BORDER_CONSTANT, value=color_bgr)
-        
-        # 4. Final outline for definition
-        final_border = cv2.copyMakeBorder(img_bordered, 1, 1, 1, 1,
-                                        cv2.BORDER_CONSTANT, 
-                                        value=self.final_outline_color)
-        
-        return final_border
-    
-    def add_text_overlay(self, ax: Axes, x: float, y: float, 
-                        gt_leaf: str, pred_node: str, fallback_level: int, 
-                        confidence: float):
-        """Add professional text overlay with color-coded styling."""
-        # Get fallback level styling
-        encoding = get_fallback_visual_encoding(fallback_level)
-        text_color = encoding['color']
-        
-        # Format label text
-        label_text = f"GT: {gt_leaf}\nPred: {pred_node}\nConf: {confidence:.2f}"
-        
-        # Create light background color
-        rgb_color = mcolors.to_rgb(text_color)
-        light_color_rgb = tuple([min(1.0, c * 0.2 + 0.8) for c in rgb_color])
-        
-        # Professional text box
-        text_box = dict(
-            boxstyle='round,pad=0.4,rounding_size=0.3',
-            facecolor=light_color_rgb,
-            edgecolor=text_color,
-            alpha=0.85,
-            linewidth=2.0
-        )
-        
-        # Add text with professional styling
-        text = ax.text(
-            x, y, label_text,
-            fontsize=self.text_overlay_fontsize,
-            color='black',
-            weight='bold',
-            ha='center', va='top',
-            zorder=11,
-            linespacing=1.2,
-            bbox=text_box
-        )
-        
-        # Add text outline for better readability
-        text.set_path_effects([
-            path_effects.withStroke(linewidth=0.8, foreground='white')
-        ])
-    
-    def finalize_plot(self, fig: Figure):
-        """Apply final professional touches to the plot."""
-        fig.tight_layout(pad=2.5)
-    
-    def save_figure(self, fig: Figure, save_path: str, model_path: str, 
-                   num_examples: int) -> str:
-        """Save figure with professional metadata and naming."""
-        # Generate detailed filename
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
-        base, ext = os.path.splitext(save_path)
-        detailed_path = f"{base}_{model_name_clean}_{num_examples}ex_{timestamp}{ext}"
-        
-        # Ensure directory exists
-        save_dir = os.path.dirname(detailed_path)
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Professional metadata
-        metadata = {
-            'Title': f'UMAP visualization with {num_examples} detection examples',
-            'Author': 'Hierarchical Object Detection',
-            'Description': f'Model: {model_name_clean}, Examples: {num_examples}, Date: {timestamp}',
-            'Keywords': 'UMAP, embeddings, object detection, hierarchy'
-        }
-        
-        # Save with high quality
-        fig.savefig(detailed_path, dpi=300, bbox_inches='tight', 
-                   facecolor='white', pad_inches=0.3, metadata=metadata)
-        
-        return detailed_path
-
 
 # =============================================================================
 # MODEL UTILITIES
@@ -1785,6 +1484,282 @@ def build_hue_map(root: HierarchyNode, shrink: float = 0.8) -> Dict[str, float]:
 # UMAP and Prototype Embedding Functions (adapted from embeddings notebook)
 # -----------------------------------------------------------------------------
 
+def _load_model_and_initial_data(
+    model_path_str: str, 
+    config_path_str: str, 
+    provided_prototype_embeddings: Optional[np.ndarray] = None
+) -> Tuple[Optional[Any], Optional[HierarchyTree], Optional[List[str]], Optional[np.ndarray]]:
+    """Loads the model, hierarchy, labels from annotations, and prototype embeddings."""
+    try:
+        print(f"Loading model config from: {config_path_str}")
+        cfg = Config.fromfile(config_path_str)
+        
+        # Load hierarchy and labels using the existing helper
+        hierarchy, labels_from_ann = _load_hierarchy_and_labels_from_config(cfg)
+        if hierarchy is None or labels_from_ann is None:
+            print("Error: Failed to load hierarchy or labels from config.")
+            return None, None, None, None
+
+        model_path_obj = pathlib.Path(model_path_str)
+        if not model_path_obj.exists():
+            print(f"Error: Model file not found at '{model_path_obj}'")
+            return None, hierarchy, labels_from_ann, None # Return what we have so far
+
+        print(f"Loading model from {model_path_str}")
+        # Ensure config_path_str is the actual model's config for init_detector
+        model = init_detector(config_path_str, model_path_str, device='cpu') # Use CPU for loading
+
+        prototype_embeddings_to_use: Optional[np.ndarray] = None
+        if provided_prototype_embeddings is not None:
+            prototype_embeddings_to_use = provided_prototype_embeddings
+            print(f"Using pre-computed prototype embeddings with shape {prototype_embeddings_to_use.shape}")
+        else:
+            if model:
+                try:
+                    # This logic for getting target_classifier might need to be robust
+                    last_branch_idx = get_last_classification_branch_index(model)
+                    target_branch_idx = last_branch_idx -1 # Assuming second-to-last
+                    target_classifier = getattr(model.bbox_head.cls_branches, str(target_branch_idx))
+                    prototype_embeddings_to_use = target_classifier.prototypes.detach().cpu().numpy()
+                    print(f"Extracted prototype embeddings from model branch {target_branch_idx}, shape: {prototype_embeddings_to_use.shape}")
+                except Exception as e:
+                    print(f"Error extracting prototype embeddings from model: {e}")
+                    # Continue without prototype_embeddings_to_use if extraction fails
+            else:
+                print("Model not loaded, cannot extract prototype embeddings.")
+        
+        if prototype_embeddings_to_use is not None and labels_from_ann is not None and len(prototype_embeddings_to_use) != len(labels_from_ann):
+             print(f"Warning: Number of prototype embeddings ({len(prototype_embeddings_to_use)}) != number of categories from annotation ({len(labels_from_ann)})")
+
+
+        return model, hierarchy, labels_from_ann, prototype_embeddings_to_use
+
+    except Exception as e:
+        print(f"Error in _load_model_and_initial_data: {e}")
+        traceback.print_exc()
+        return None, None, None, None
+
+
+def _calculate_and_print_projection_diagnostics(
+    high_dim_embeddings: np.ndarray, # Embeddings that were input to UMAP/MDS
+    low_dim_projections: np.ndarray  # Output 2D projections from UMAP/MDS
+):
+    """Calculates and prints projection quality diagnostics."""
+    if not SCIPY_AVAILABLE or len(high_dim_embeddings) < 10 or low_dim_projections is None or len(low_dim_projections) < 10:
+        print("Skipping projection quality diagnostics: SciPy not available or insufficient data.")
+        return
+
+    print("\n=== Projection Quality Diagnostics ===")
+    try:
+        from sklearn.manifold import trustworthiness
+        # Ensure n_neighbors is valid
+        k_trust = min(5, len(high_dim_embeddings) - 1)
+        if k_trust < 1:
+             print("⚠️ Trustworthiness: Not enough samples to compute (k_trust < 1).")
+        else:
+            trust_score = trustworthiness(high_dim_embeddings, low_dim_projections, n_neighbors=k_trust)
+            print(f"Trustworthiness (k={k_trust}): {trust_score:.4f} {'✅ Good' if trust_score > 0.87 else '⚠️ Moderate' if trust_score > 0.7 else '❌ Poor'}")
+        
+        from scipy.spatial.distance import pdist
+        from scipy.stats import pearsonr
+        
+        if len(high_dim_embeddings) >= 2 and len(low_dim_projections) >= 2: # pdist needs at least 2 points
+            high_d_distances = pdist(high_dim_embeddings, metric='euclidean')
+            low_d_distances = pdist(low_dim_projections, metric='euclidean')
+
+            if len(high_d_distances) > 1 and len(low_d_distances) > 1 and len(high_d_distances) == len(low_d_distances):
+                distance_corr, _ = pearsonr(high_d_distances, low_d_distances)
+                print(f"Distance correlation: {distance_corr:.4f} {'✅ Good' if distance_corr > 0.6 else '⚠️ Moderate' if distance_corr > 0.3 else '❌ Poor'}")
+            else:
+                print("⚠️ Could not compute distance correlation (insufficient or mismatched distance data).")
+        else:
+            print("⚠️ Distance correlation: Not enough samples to compute (need at least 2).")
+
+        # Continuity calculation (from your existing code)
+        from sklearn.neighbors import NearestNeighbors
+        k_continuity = min(5, len(high_dim_embeddings) - 1)
+        if k_continuity < 1:
+            print("⚠️ Continuity: Not enough samples to compute (k_continuity < 1).")
+        else:
+            nbrs_high = NearestNeighbors(n_neighbors=k_continuity + 1, metric='euclidean').fit(high_dim_embeddings)
+            nbrs_low = NearestNeighbors(n_neighbors=k_continuity + 1, metric='euclidean').fit(low_dim_projections)
+            
+            _, indices_high = nbrs_high.kneighbors(high_dim_embeddings)
+            _, indices_low = nbrs_low.kneighbors(low_dim_projections)
+            
+            continuity_scores = []
+            for i in range(len(high_dim_embeddings)):
+                high_neighbors = set(indices_high[i][1:])
+                low_neighbors = set(indices_low[i][1:])
+                overlap = len(high_neighbors.intersection(low_neighbors))
+                continuity_scores.append(overlap / k_continuity)
+            
+            continuity = np.mean(continuity_scores)
+            print(f"Continuity (k={k_continuity}): {continuity:.4f} {'✅ Good' if continuity > 0.7 else '⚠️ Moderate' if continuity > 0.5 else '❌ Poor'}")
+
+        # Overall assessment (can be simplified or kept if trust_score and distance_corr are available)
+        # This part depends on trust_score and distance_corr being successfully computed.
+        # For simplicity, I'll omit the direct overall assessment print here, 
+        # as the individual metrics already give a good indication.
+        # You can add it back if you ensure trust_score and distance_corr are defined.
+
+    except ImportError as e:
+        print(f"Some diagnostics unavailable due to missing libraries: {e}")
+    except Exception as e:
+        print(f"Error computing projection diagnostics: {e}")
+        traceback.print_exc()
+    print("=" * 40)
+
+
+def _perform_dimensionality_reduction_and_validation(
+    prototype_embeddings: np.ndarray,
+    query_embeddings: Optional[np.ndarray],
+    model: Optional[Any], # For model-aware validation
+    prototype_class_labels: List[str], # Labels for prototype_embeddings
+    detection_examples: Optional[List[Dict[str, Any]]], # For validation
+    random_state: int,
+    use_mds: bool
+) -> Tuple[Optional[Any], Optional[np.ndarray], Optional[PCA]]:
+    """
+    Performs dimensionality reduction (PCA + UMAP/MDS) and associated validations.
+    Returns the projection model (UMAP reducer or None), combined 2D projections, and PCA transformer.
+    """
+    combined_embeddings_for_fitting = prototype_embeddings
+    num_prototypes = len(prototype_embeddings)
+
+    if query_embeddings is not None and len(query_embeddings) > 0:
+        if query_embeddings.shape[1] != prototype_embeddings.shape[1]:
+            print(f"Warning: Query embedding dim ({query_embeddings.shape[1]}) != prototype dim ({prototype_embeddings.shape[1]}). Skipping queries for fitting.")
+        else:
+            print(f"Including {len(query_embeddings)} query embeddings in dimensionality reduction fitting...")
+            combined_embeddings_for_fitting = np.vstack([prototype_embeddings, query_embeddings])
+    
+    can_perform_query_validation = False
+    validation_pred_labels = None
+    num_valid_examples_for_val = 0 
+    aligned_query_embeddings_for_validation = None 
+
+    if query_embeddings is not None and len(query_embeddings) > 0 and detection_examples:
+        _pred_labels_list = [ex['pred_label'] for ex in detection_examples if 'pred_label' in ex]
+        if _pred_labels_list:
+            validation_pred_labels = np.array(_pred_labels_list)
+            num_valid_examples_for_val = len(validation_pred_labels)
+
+            if num_valid_examples_for_val > 0 and len(query_embeddings) >= num_valid_examples_for_val:
+                can_perform_query_validation = True
+                aligned_query_embeddings_for_validation = query_embeddings[:num_valid_examples_for_val]
+            else:
+                # Use num_valid_examples_for_val directly as it's defined above
+                print(f"⚠️  Query validation setup failed: Insufficient or mismatched query embeddings for available prediction labels. Queries: {len(query_embeddings)}, Pred Labels: {num_valid_examples_for_val}")
+        else:
+            print("⚠️  Query validation setup failed: No 'pred_label' found in detection_examples.")
+            # num_valid_examples_for_val remains 0 from initialization
+    else:
+        print("⚠️  Query validation setup skipped: No query embeddings or detection examples provided.")
+        # num_valid_examples_for_val remains 0 from initialization
+
+    
+    
+    # === Pre-transformation Validation (Original Embedding Space) ===
+    print("\n=== Pre-transformation Validation (Original Embedding Space) ===")
+    if can_perform_query_validation:
+        original_result = validate_nearest_neighbor_accuracy(
+            aligned_query_embeddings_for_validation, prototype_embeddings, validation_pred_labels,
+            prototype_class_labels, "Original", model=model, sample_size=min(10, len(aligned_query_embeddings_for_validation))
+        )
+        original_result.print_summary()
+    else:
+        print("⚠️  Skipping pre-transformation validation as conditions were not met.")
+
+    # Apply PCA preprocessing
+    preprocessed_embeddings_for_fitting = combined_embeddings_for_fitting
+    pca_transformer = None
+    if PCA_AVAILABLE and len(combined_embeddings_for_fitting) > 50: # Ensure enough samples for PCA
+        n_components = min(50, combined_embeddings_for_fitting.shape[1], len(combined_embeddings_for_fitting) - 1)
+        if n_components > 10 and combined_embeddings_for_fitting.shape[1] > n_components: # Meaningful reduction
+            print(f"Applying PCA: {combined_embeddings_for_fitting.shape[1]}D -> {n_components}D on {len(combined_embeddings_for_fitting)} embeddings")
+            pca_transformer = PCA(n_components=n_components, random_state=random_state)
+            preprocessed_embeddings_for_fitting = pca_transformer.fit_transform(combined_embeddings_for_fitting)
+            explained_var = np.sum(pca_transformer.explained_variance_ratio_)
+            print(f"PCA preserved {explained_var:.1%} of variance")
+
+            # PCA Validation (simplified here, can be expanded if needed)
+            print("\n=== PCA Validation ===")
+            if can_perform_query_validation: # pca_transformer is non-None if we are in this block
+                preprocessed_prototypes_pca = pca_transformer.transform(prototype_embeddings)
+                preprocessed_validation_queries_pca = pca_transformer.transform(aligned_query_embeddings_for_validation)
+                
+                pca_val_result = validate_nearest_neighbor_accuracy(
+                    preprocessed_validation_queries_pca, preprocessed_prototypes_pca, validation_pred_labels,
+                    prototype_class_labels, "PCA", model=None, sample_size=min(10, len(preprocessed_validation_queries_pca))
+                )
+                pca_val_result.print_summary()
+            else:
+                print("⚠️  Skipping PCA validation as conditions for query validation were not met.")
+            print("=" * 40)
+        else:
+            print("Skipping PCA: insufficient dimensionality reduction benefit or input dim too low.")
+    elif not PCA_AVAILABLE:
+        print("Scikit-learn not available, skipping PCA.")
+    else:
+        print("Skipping PCA: insufficient samples.")
+
+    # Dimensionality Reduction (UMAP or MDS)
+    projection_model_reducer = None
+    combined_2d_projections = None
+
+    n_neighbors_val = min(15, len(preprocessed_embeddings_for_fitting) - 1 if len(preprocessed_embeddings_for_fitting) > 1 else 1)
+    min_dist_val = 0.1
+    if query_embeddings is not None and len(query_embeddings) > 0: # If joint fitting
+        n_neighbors_val = min(10, len(preprocessed_embeddings_for_fitting) - 1 if len(preprocessed_embeddings_for_fitting) > 1 else 1)
+        min_dist_val = 0.05
+    
+    if use_mds and PCA_AVAILABLE: # MDS typically needs PCA first if high-dim
+        print(f"Using MetricMDS (on {'PCA-ed' if pca_transformer else 'original'} embeddings)...")
+        mds = MDS(n_components=2, metric=True, random_state=random_state, dissimilarity='euclidean', normalized_stress='auto', n_jobs=-1)
+        combined_2d_projections = mds.fit_transform(preprocessed_embeddings_for_fitting)
+        print(f"MDS stress: {format(mds.stress_, '.4f') if hasattr(mds, 'stress_') else 'N/A'}")
+        projection_model_reducer = None # MDS doesn't return a reusable transformer in the same way UMAP does
+    else:
+        print(f"Using UMAP (on {'PCA-ed' if pca_transformer else 'original'} embeddings) with n_neighbors={n_neighbors_val}, min_dist={min_dist_val}...")
+        projection_model_reducer = umap.UMAP(
+            random_state=random_state, n_neighbors=n_neighbors_val, min_dist=min_dist_val, metric='euclidean', spread=1.0
+        )
+        combined_2d_projections = projection_model_reducer.fit_transform(preprocessed_embeddings_for_fitting)
+    
+    if combined_2d_projections is None:
+        print("Error: Dimensionality reduction failed.")
+        return None, None, pca_transformer
+        
+    print(f"{'MDS' if use_mds and PCA_AVAILABLE else 'UMAP'} fitting completed. Output shape: {combined_2d_projections.shape}")
+
+    print(f"\n=== Post-transformation Validation (2D Projected Space) ===")
+    if can_perform_query_validation:
+        
+        projected_queries_2d_all = combined_2d_projections[num_prototypes:]
+
+        if len(projected_queries_2d_all) >= num_valid_examples_for_val:
+            prototypes_2d = combined_2d_projections[:num_prototypes]
+            queries_2d_for_val = projected_queries_2d_all[:num_valid_examples_for_val] 
+
+            proj_result = validate_nearest_neighbor_accuracy(
+                queries_2d_for_val, prototypes_2d, validation_pred_labels,
+                prototype_class_labels, "2D Projection", model=None, sample_size=min(10, len(queries_2d_for_val))
+            )
+            proj_result.print_summary()
+        else:
+            print(f"⚠️  Cannot perform 2D validation: Mismatched projected 2D queries ({len(projected_queries_2d_all)}) and prediction labels ({num_valid_examples_for_val}). Query embeddings might have been skipped during dimensionality reduction fitting.")
+    else:
+        print("⚠️  Skipping 2D validation as initial conditions for query validation were not met.")
+
+    _calculate_and_print_projection_diagnostics(
+        preprocessed_embeddings_for_fitting, # This is what UMAP/MDS was fit on
+        combined_2d_projections
+    )
+        
+    return projection_model_reducer, combined_2d_projections, pca_transformer
+
+
 def load_embeddings_and_umap(model_path: str, config_path: str, random_state: int = 42, query_embeddings: Optional[np.ndarray] = None, prototype_embeddings: Optional[np.ndarray] = None, use_mds: bool = False, detection_examples: Optional[List] = None) -> Tuple[Optional[np.ndarray], Optional[umap.UMAP], Optional[HierarchyTree], Optional[Dict[str, float]], Optional[List[str]], Optional[Dict[str, np.ndarray]], Optional[np.ndarray]]:
     """Load embeddings, fit UMAP or MDS, and prepare data structures.
     
@@ -1804,582 +1779,75 @@ def load_embeddings_and_umap(model_path: str, config_path: str, random_state: in
         Both prototype and query embeddings use the same transformation pipeline via the
         EmbeddingClassifier's 'prototypes' property, ensuring they are in the same space.
     """
-    try:
-        # Extract annotation file path from config
-        print(f"Extracting annotation file path from config: {config_path}")
-        from mmengine.config import Config
-        cfg = Config.fromfile(config_path)
-        
-        ann_file_path = None
-        if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
-            ann_file = cfg.test_dataloader.dataset.ann_file
-            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg.test_dataloader.dataset, 'data_root') else ''
-            if data_root and not os.path.isabs(ann_file):
-                ann_file_path = os.path.join(data_root, ann_file)
-            else:
-                ann_file_path = ann_file
-        
-        # Fallback to a reasonable default if not found
-        if ann_file_path is None:
-            data_root = cfg.test_dataloader.dataset.data_root if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset') and hasattr(cfg.test_dataloader.dataset, 'data_root') else 'data/aircraft'
-            ann_file_path = os.path.join(data_root, 'aircraft_test.json')
-            print(f"Warning: Could not find annotation file in config, using fallback: {ann_file_path}")
-        
-        print(f"Using annotation file: {ann_file_path}")
-        
-        model_path_obj = pathlib.Path(model_path)
-        ann_file_path_obj = pathlib.Path(ann_file_path)
+    model, hierarchy, labels_from_ann, embeddings_from_load = _load_model_and_initial_data(
+        model_path, config_path, provided_prototype_embeddings=prototype_embeddings
+    )
 
-        if not model_path_obj.exists():
-            print(f"Error: Model file not found at '{model_path_obj}'")
-            return None, None, None, None, None, None, None
-        if not ann_file_path_obj.exists():
-            print(f"Error: Annotation file not found at '{ann_file_path_obj}'")
-            return None, None, None, None, None, None, None
-
-        # Always load the model for validation purposes
-        print(f"Loading model from {model_path}")
-        
-        # Determine config path from model path
-        actual_config_path = str(model_path_obj).replace('.pth', '.py')
-        if not pathlib.Path(actual_config_path).exists():
-            print(f"Warning: Config file not found at {actual_config_path}, trying to infer...")
-            # Try to find config in the same directory
-            model_dir = model_path_obj.parent
-            config_files = list(model_dir.glob("*.py"))
-            if config_files:
-                actual_config_path = str(config_files[0])
-                print(f"Using config file: {actual_config_path}")
-            else:
-                raise FileNotFoundError(f"Could not find config file for model at {model_path}")
-        
-        # Load model
-        model = init_detector(actual_config_path, model_path, device='cpu')
-
-        # Use pre-computed embeddings if provided, otherwise extract prototypes from model
-        if prototype_embeddings is not None:
-            embeddings = prototype_embeddings
-            print(f"Using pre-computed prototype embeddings with shape {embeddings.shape}")
-        else:
-            # Use the model's prototypes property to get properly transformed embeddings
-            # This ensures consistency with query embeddings captured from get_projected_features hook
-            last_branch_idx = get_last_classification_branch_index(model)
-            target_branch_idx = last_branch_idx - 1  # Second-to-last branch for actual classification
-            target_classifier = getattr(model.bbox_head.cls_branches, str(target_branch_idx))
-            embeddings = target_classifier.prototypes.detach().cpu().numpy()
-            print(f"Using model's prototypes property from branch {target_branch_idx}")
-            print(f"Extracted {len(embeddings)} prototype embeddings with shape {embeddings.shape}")
-
-        # Load annotation data
-        ann = load(ann_file_path_obj)
-        if not isinstance(ann, dict) or "categories" not in ann or "taxonomy" not in ann:
-            print("Error: Annotation file is missing 'categories' or 'taxonomy' keys.")
-            return None, None, None, None, None, None, None
-        
-        categories = ann["categories"]
-        if len(embeddings) != len(categories):
-            print(f"Warning: Number of embeddings ({len(embeddings)}) != categories ({len(categories)})")
-
-        labels_from_ann = [cat["name"] for cat in categories] # These are usually leaf node names
-        hierarchy = HierarchyTree(ann["taxonomy"])
-
-        # Prepare embeddings for UMAP fitting
-        query_projections = None
-        if query_embeddings is not None and len(query_embeddings) > 0:
-            print(f"Including {len(query_embeddings)} query embeddings in UMAP fitting...")
-            
-            # Verify query embeddings are the same dimensionality as prototypes
-            if query_embeddings.shape[1] != embeddings.shape[1]:
-                print(f"Warning: Query embedding dimensionality ({query_embeddings.shape[1]}) " +
-                      f"doesn't match prototype dimensionality ({embeddings.shape[1]}). Skipping.")
-                combined_embeddings = embeddings
-            else:
-                # Print some stats to verify the embeddings look reasonable
-                proto_norm = np.mean(np.linalg.norm(embeddings, axis=1))
-                query_norm = np.mean(np.linalg.norm(query_embeddings, axis=1))
-                print(f"Prototype embeddings mean norm: {proto_norm:.4f}")
-                print(f"Query embeddings mean norm: {query_norm:.4f}")
-                
-                # DEBUG: Check query embedding diversity
-                if len(query_embeddings) > 1:
-                    from scipy.spatial.distance import pdist
-                    query_distances = pdist(query_embeddings, metric='euclidean')
-                    mean_distance = np.mean(query_distances)
-                    print(f"Query embedding diversity - mean distance: {mean_distance:.6f}")
-                    
-                    # Check if queries are too similar
-                    if mean_distance < 0.01:
-                        print(f"WARNING: Query embeddings are very similar (mean distance: {mean_distance:.6f})")
-                        print(f"         This could cause MDS to place them all at the same location")
-                
-                # Combine prototype and query embeddings for joint UMAP fitting
-                combined_embeddings = np.vstack([embeddings, query_embeddings])
-        else:
-            combined_embeddings = embeddings
-
-        # Fit UMAP on combined embeddings with optimized settings for joint fitting
-        if query_embeddings is not None and len(query_embeddings) > 0:
-            # Use more conservative settings when fitting both prototypes and queries together
-            n_neighbors = min(10, len(combined_embeddings)-1 if len(combined_embeddings) > 1 else 1)
-            min_dist = 0.05  # Tighter clusters for better prototype-query relationships
-            print(f"Joint UMAP fitting with {len(embeddings)} prototypes + {len(query_embeddings)} queries")
-            print(f"Using n_neighbors={n_neighbors}, min_dist={min_dist} for better query positioning")
-        else:
-            # Standard settings for prototype-only fitting
-            n_neighbors = min(15, len(combined_embeddings)-1 if len(combined_embeddings) > 1 else 1)
-            min_dist = 0.1
-            print(f"Prototype-only UMAP fitting with {len(embeddings)} prototypes")
-
-        # === PRE-TRANSFORMATION VALIDATION ===
-        # Validate that nearest neighbors match actual predictions in the original embedding space
-        print("\n=== Pre-transformation Validation (Original Embedding Space) ===")
-        if query_embeddings is not None and len(query_embeddings) > 0:
-            if detection_examples is not None and len(detection_examples) > 0:
-                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples if 'pred_label' in ex])
-                # Ensure query_embeddings used for validation align with detection_examples
-                # This assumes query_embeddings were generated from these detection_examples
-                validation_queries = query_embeddings[:len(validation_pred_labels)] # Align lengths
-
-                if len(validation_queries) == len(validation_pred_labels) and len(validation_pred_labels) > 0:
-                    original_result = validate_nearest_neighbor_accuracy(
-                        validation_queries, embeddings, validation_pred_labels,
-                        labels_from_ann, # Pass class names for prototypes
-                        "Original", model=model, sample_size=min(10, len(validation_queries))
-                    )
-                    original_result.print_summary()
-                else:
-                    print(f"⚠️  Mismatch: {len(validation_queries)} query embeddings vs {len(validation_pred_labels)} prediction labels")
-                    print("    Cannot perform pre-transformation validation")
-            else:
-                print("⚠️  No detection examples available for validation")
-                print("    Pre-transformation validation requires detection examples with prediction labels")
-        else:
-            print("⚠️  No query embeddings available for validation")
-
-        # Apply PCA preprocessing if sklearn is available and we have enough samples
-        # CRITICAL: PCA must be fitted on the combined embeddings (prototypes + queries) 
-        # to ensure both are in the same preprocessed space
-        preprocessed_embeddings = combined_embeddings
-        pca_transformer = None  # Store the PCA transformer for validation
-        
-        if PCA_AVAILABLE and len(combined_embeddings) > 50:
-            n_components = min(50, combined_embeddings.shape[1], len(combined_embeddings) - 1)
-            if n_components > 10:  # Only apply if we can meaningfully reduce dimensionality
-                print(f"Applying PCA preprocessing: {combined_embeddings.shape[1]}D → {n_components}D")
-                print(f"PCA fitted on {len(combined_embeddings)} total embeddings (prototypes + queries)")
-                
-                pca_transformer = PCA(n_components=n_components, random_state=random_state)
-                preprocessed_embeddings = pca_transformer.fit_transform(combined_embeddings)
-                explained_var = np.sum(pca_transformer.explained_variance_ratio_)
-                print(f"PCA preserved {explained_var:.1%} of variance")
-                
-                # Validate nearest neighbor preservation after PCA
-                print("\n=== PCA Nearest Neighbor Validation ===")
-                if query_embeddings is not None and len(query_embeddings) > 0:
-                    # Split back to original and preprocessed for comparison
-                    original_prototypes = embeddings
-                    original_queries = query_embeddings
-                    preprocessed_prototypes = preprocessed_embeddings[:len(embeddings)]
-                    preprocessed_queries = preprocessed_embeddings[len(embeddings):]
-                    
-                    # Check nearest neighbor preservation for a sample of queries
-                    sample_size = min(10, len(original_queries))
-                    preserved_nn = 0
-                    pca_detailed_results = []
-                    
-                    print("Validating basic nearest neighbor preservation (without prediction verification):")
-                    
-                    for i in range(sample_size):
-                        # Find nearest neighbor in original space
-                        query_orig = original_queries[i:i+1]
-                        distances_orig = np.linalg.norm(original_prototypes - query_orig, axis=1)
-                        nn_orig = np.argmin(distances_orig)
-                        
-                        # Find nearest neighbor in PCA space
-                        query_pca = preprocessed_queries[i:i+1]
-                        distances_pca = np.linalg.norm(preprocessed_prototypes - query_pca, axis=1)
-                        nn_pca = np.argmin(distances_pca)
-                        
-                        preserved = nn_orig == nn_pca
-                        if preserved:
-                            preserved_nn += 1
-                        
-                        pca_detailed_results.append({
-                            'query_idx': i,
-                            'nn_orig': nn_orig,
-                            'nn_pca': nn_pca,
-                            'preserved': preserved,
-                            'orig_dist': distances_orig[nn_orig],
-                            'pca_dist': distances_pca[nn_pca]
-                        })
-                    
-                    nn_preservation = preserved_nn / sample_size
-                    print(f"Nearest neighbor preservation: {preserved_nn}/{sample_size} ({nn_preservation:.1%})")
-                    
-                    # Show detailed breakdown for debugging
-                    if sample_size <= 5:  # Only show details for small samples
-                        print("Detailed breakdown:")
-                        for result in pca_detailed_results:
-                            status = "✅" if result['preserved'] else "❌"
-                            print(f"  Query {result['query_idx']}: NN {result['nn_orig']} → {result['nn_pca']} {status}")
-                    
-                    if nn_preservation >= 0.8:
-                        print("✅ Good: PCA preserves nearest neighbor relationships")
-                    elif nn_preservation >= 0.6:
-                        print("⚠️ Moderate: Some nearest neighbor relationships changed")
-                    else:
-                        print("❌ Poor: Many nearest neighbor relationships changed")
-                    
-                    # Additional validation with actual predictions if detection examples are available
-                    if detection_examples is not None and len(detection_examples) > 0:
-                        # Extract prediction labels (class indices) directly from detection examples
-                        validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples])
-                        
-                        aligned_preprocessed_queries = preprocessed_queries[:len(validation_pred_labels)]
-
-                        if len(validation_pred_labels) == len(aligned_preprocessed_queries) and len(validation_pred_labels) > 0:
-                            pca_result = validate_nearest_neighbor_accuracy(
-                                aligned_preprocessed_queries, preprocessed_prototypes, validation_pred_labels,
-                                labels_from_ann, # Pass class names for prototypes
-                                "PCA", model=None, sample_size=min(10, len(aligned_preprocessed_queries))
-                            )
-                            pca_result.print_summary()
-                        else:
-                            print("⚠️ Cannot validate PCA predictions: embedding/label count mismatch")
-                    else:
-                        print("💡 Note: To validate that nearest neighbors = predictions, detection examples needed")
-                
-                # Validate that both prototypes and queries were preprocessed consistently
-                if query_embeddings is not None and len(query_embeddings) > 0:
-                    print(f"✅ Both prototypes and queries preprocessed by same PCA transformation")
-                    print(f"   Preprocessed prototypes: {len(embeddings)} samples")
-                    print(f"   Preprocessed queries: {len(query_embeddings)} samples")
-                print("=" * 40)
-            else:
-                print("Skipping PCA: insufficient dimensionality reduction benefit")
-        elif not PCA_AVAILABLE:
-            print("Scikit-learn not available, skipping PCA preprocessing")
-        else:
-            print("Skipping PCA: insufficient samples for preprocessing")
-
-        # Choose projection method: UMAP or MetricMDS
-        if use_mds and PCA_AVAILABLE:
-            print("Using MetricMDS for better distance preservation...")
-            mds = MDS(n_components=2, metric=True, random_state=random_state, 
-                     dissimilarity='euclidean', normalized_stress='auto')
-            combined_umap_2d = mds.fit_transform(preprocessed_embeddings)
-            reducer = None  # MDS doesn't return a reusable transformer
-            print(f"MDS fitting completed. Output shape: {combined_umap_2d.shape}")
-            print(f"MDS stress: {mds.stress_:.4f}")
-            
-            # Check for potential issues with MDS output
-            if query_embeddings is not None:
-                query_coords = combined_umap_2d[len(embeddings):]
-                query_variance_x = np.var(query_coords[:, 0])
-                query_variance_y = np.var(query_coords[:, 1])
-                if query_variance_x < 1e-6 and query_variance_y < 1e-6:
-                    print(f"WARNING: Query coordinates have very low variance (X: {query_variance_x:.8f}, Y: {query_variance_y:.8f})")
-                    print("This suggests the query embeddings are too similar or there's a bug in the embedding collection")
-        else:
-            # Use UMAP with optimized settings
-            if query_embeddings is not None and len(query_embeddings) > 0:
-                # Use more conservative settings when fitting both prototypes and queries together
-                n_neighbors = min(10, len(combined_embeddings)-1 if len(combined_embeddings) > 1 else 1)
-                min_dist = 0.05  # Tighter clusters for better prototype-query relationships
-                print(f"Joint UMAP fitting with {len(embeddings)} prototypes + {len(query_embeddings)} queries")
-                print(f"Using n_neighbors={n_neighbors}, min_dist={min_dist} for better query positioning")
-            else:
-                # Standard settings for prototype-only fitting
-                n_neighbors = min(15, len(combined_embeddings)-1 if len(combined_embeddings) > 1 else 1)
-                min_dist = 0.1
-                print(f"Prototype-only UMAP fitting with {len(embeddings)} prototypes")
-                
-            reducer = umap.UMAP(
-                random_state=random_state, 
-                n_neighbors=n_neighbors, 
-                min_dist=min_dist, 
-                metric='euclidean',
-                spread=1.0
-            )
-            print(f"Fitting UMAP on {len(preprocessed_embeddings)} total embeddings...")
-            combined_umap_2d = reducer.fit_transform(preprocessed_embeddings)
-            print(f"UMAP fitting completed. Output shape: {combined_umap_2d.shape}")
-        
-        # Ensure we have a proper numpy array
-        if hasattr(combined_umap_2d, 'toarray'):  # For sparse matrix
-            combined_umap_2d = combined_umap_2d.toarray()
-        else:  # Already dense
-            combined_umap_2d = np.asarray(combined_umap_2d)
-        
-        # Validate nearest neighbor preservation after dimensionality reduction (UMAP/MDS)
-        if query_embeddings is not None and len(query_embeddings) > 0:
-            print(f"\n=== {'MDS' if use_mds and PCA_AVAILABLE else 'UMAP'} Nearest Neighbor Validation ===")
-            
-            # Split 2D projections
-            prototype_2d = combined_umap_2d[:len(embeddings)]
-            query_2d = combined_umap_2d[len(embeddings):]
-            
-            # Check nearest neighbor preservation from high-D to 2D
-            sample_size = min(10, len(query_embeddings))
-            preserved_nn_2d = 0
-            detailed_results = []
-            
-            for i in range(sample_size):
-                # Find nearest neighbor in high-D space (preprocessed embeddings)
-                query_high_d = preprocessed_embeddings[len(embeddings) + i:len(embeddings) + i + 1]
-                distances_high_d = np.linalg.norm(preprocessed_embeddings[:len(embeddings)] - query_high_d, axis=1)
-                nn_high_d = np.argmin(distances_high_d)
-                
-                # Find nearest neighbor in 2D space
-                query_2d_point = query_2d[i:i+1]
-                distances_2d = np.linalg.norm(prototype_2d - query_2d_point, axis=1)
-                nn_2d = np.argmin(distances_2d)
-                
-                preserved = nn_high_d == nn_2d
-                if preserved:
-                    preserved_nn_2d += 1
-                
-                # Store detailed results for debugging
-                detailed_results.append({
-                    'query_idx': i,
-                    'nn_high_d': nn_high_d,
-                    'nn_2d': nn_2d,
-                    'preserved': preserved,
-                    'high_d_dist': distances_high_d[nn_high_d],
-                    '2d_dist': distances_2d[nn_2d]
-                })
-            
-            nn_preservation_2d = preserved_nn_2d / sample_size
-            print(f"High-D to 2D nearest neighbor preservation: {preserved_nn_2d}/{sample_size} ({nn_preservation_2d:.1%})")
-            
-            # Show detailed breakdown for debugging
-            if sample_size <= 5:  # Only show details for small samples
-                print("Detailed breakdown:")
-                for result in detailed_results:
-                    status = "✅" if result['preserved'] else "❌"
-                    print(f"  Query {result['query_idx']}: NN {result['nn_high_d']} → {result['nn_2d']} {status}")
-            
-            if nn_preservation_2d >= 0.8:
-                print("✅ Excellent: 2D projection preserves nearest neighbor relationships")
-            elif nn_preservation_2d >= 0.6:
-                print("⚠️ Good: Most nearest neighbor relationships preserved in 2D")
-            elif nn_preservation_2d >= 0.4:
-                print("⚠️ Moderate: Some nearest neighbor relationships changed in 2D")
-            else:
-                print("❌ Poor: Many nearest neighbor relationships lost in 2D projection")
-                print("💡 Consider: Different UMAP parameters, MetricMDS, or more PCA components")
-            
-            # Additional validation: Check if original space nearest neighbors are also preserved
-            if pca_transformer is not None:
-                print("\nOriginal to 2D nearest neighbor preservation:")
-                preserved_nn_orig_2d = 0
-                orig_detailed_results = []
-                
-                for i in range(sample_size):
-                    # Find nearest neighbor in original space
-                    query_orig = query_embeddings[i:i+1]
-                    distances_orig = np.linalg.norm(embeddings - query_orig, axis=1)
-                    nn_orig = np.argmin(distances_orig)
-                    
-                    # Find nearest neighbor in 2D space (same as above)
-                    query_2d_point = query_2d[i:i+1]
-                    distances_2d = np.linalg.norm(prototype_2d - query_2d_point, axis=1)
-                    nn_2d = np.argmin(distances_2d)
-                    
-                    preserved = nn_orig == nn_2d
-                    if preserved:
-                        preserved_nn_orig_2d += 1
-                    
-                    orig_detailed_results.append({
-                        'query_idx': i,
-                        'nn_orig': nn_orig,
-                        'nn_2d': nn_2d,
-                        'preserved': preserved
-                    })
-                
-                nn_preservation_orig_2d = preserved_nn_orig_2d / sample_size
-                print(f"Original to 2D nearest neighbor preservation: {preserved_nn_orig_2d}/{sample_size} ({nn_preservation_orig_2d:.1%})")
-                
-                # Show detailed breakdown for debugging
-                if sample_size <= 5:  # Only show details for small samples
-                    print("Detailed breakdown:")
-                    for result in orig_detailed_results:
-                        status = "✅" if result['preserved'] else "❌"
-                        print(f"  Query {result['query_idx']}: NN {result['nn_orig']} → {result['nn_2d']} {status}")
-                
-                if nn_preservation_orig_2d >= 0.7:
-                    print("✅ Great: End-to-end nearest neighbor preservation")
-                elif nn_preservation_orig_2d >= 0.5:
-                    print("⚠️ Moderate: Some end-to-end nearest neighbor preservation")
-                else:
-                    print("❌ Poor: Limited end-to-end nearest neighbor preservation")
-            
-            # Additional validation with actual predictions if detection examples are available
-            if detection_examples is not None and len(detection_examples) > 0:
-                validation_pred_labels = np.array([ex['pred_label'] for ex in detection_examples if 'pred_label' in ex])
-                # Align query_2d with validation_pred_labels
-                aligned_query_2d = query_2d[:len(validation_pred_labels)]
-
-                if len(validation_pred_labels) == len(aligned_query_2d) and len(validation_pred_labels) > 0:
-                    print("\nValidating 2D projection with actual predictions:")
-                    projection_2d_prototypes = combined_umap_2d[:len(embeddings)] # These are the prototypes in 2D
-                    # projection_2d_queries = combined_umap_2d[len(embeddings):] # Already have aligned_query_2d
-                    
-                    projection_result = validate_nearest_neighbor_accuracy(
-                        aligned_query_2d, projection_2d_prototypes, validation_pred_labels,
-                        labels_from_ann, # Pass class names for prototypes
-                        "2D projection", model=None, sample_size=min(10, len(aligned_query_2d))
-                    )
-                    projection_result.print_summary()
-                    
-                    # High-D preprocessed space validation (if PCA was applied)
-                    if pca_transformer is not None:
-                        preprocessed_prototypes_hd = preprocessed_embeddings[:len(embeddings)]
-                        # Align preprocessed_queries_hd with validation_pred_labels
-                        aligned_preprocessed_queries_hd = preprocessed_embeddings[len(embeddings):][:len(validation_pred_labels)]
-                        
-                        if len(aligned_preprocessed_queries_hd) == len(validation_pred_labels):
-                            high_d_result = validate_nearest_neighbor_accuracy(
-                                aligned_preprocessed_queries_hd, preprocessed_prototypes_hd, validation_pred_labels,
-                                labels_from_ann, # Pass class names for prototypes
-                                "High-D preprocessed", model=None, sample_size=min(10, len(aligned_preprocessed_queries_hd))
-                            )
-                            high_d_result.print_summary()
-                else:
-                    print(f"⚠️ Cannot validate 2D predictions: {len(validation_pred_labels)} labels vs {len(query_2d)} queries")
-            else:
-                print("💡 Note: Detection examples needed for prediction validation")
-            
-            print("=" * 50)
-        
-        # Split projections back into prototype and query parts
-        umap_2d = combined_umap_2d[:len(embeddings)]
-        if query_embeddings is not None and len(query_embeddings) > 0:
-            query_projections = combined_umap_2d[len(embeddings):]
-            print(f"Split UMAP results: {len(umap_2d)} prototype projections, {len(query_projections)} query projections")
-            
-            # VALIDATION: Ensure preprocessing consistency
-            if pca_transformer is not None:
-                # Split the preprocessed embeddings to validate the preprocessing was applied correctly
-                preprocessed_prototypes = preprocessed_embeddings[:len(embeddings)]
-                preprocessed_queries = preprocessed_embeddings[len(embeddings):]
-                
-                print(f"✅ PCA Preprocessing Validation:")
-                print(f"   Original prototype shape: {embeddings.shape}")
-                print(f"   Original query shape: {query_embeddings.shape}")
-                print(f"   Preprocessed prototype shape: {preprocessed_prototypes.shape}")
-                print(f"   Preprocessed query shape: {preprocessed_queries.shape}")
-                
-                # Check that both have the same number of components
-                if preprocessed_prototypes.shape[1] == preprocessed_queries.shape[1]:
-                    print(f"   ✅ Both use same {preprocessed_prototypes.shape[1]} PCA components")
-                else:
-                    print(f"   ❌ Dimensionality mismatch: prototypes={preprocessed_prototypes.shape[1]}, queries={preprocessed_queries.shape[1]}")
-                    
-                # Check that the preprocessing applied meaningful transformation
-                proto_var_reduction = (embeddings.shape[1] - preprocessed_prototypes.shape[1]) / embeddings.shape[1]
-                print(f"   Dimensionality reduction: {proto_var_reduction:.1%} ({embeddings.shape[1]}D → {preprocessed_prototypes.shape[1]}D)")
-            else:
-                print(f"✅ No PCA applied - prototypes and queries used in original {embeddings.shape[1]}D space")
-            
-            # Compute projection quality metrics if we have enough data points
-            if SCIPY_AVAILABLE and len(combined_embeddings) >= 10:
-                print("\n=== Projection Quality Diagnostics ===")
-                try:
-                    # Compute trustworthiness (how well nearest neighbors are preserved)
-                    from sklearn.manifold import trustworthiness
-                    trust_score = trustworthiness(preprocessed_embeddings, combined_umap_2d, n_neighbors=min(5, len(combined_embeddings)-1))
-                    print(f"Trustworthiness (k=5): {trust_score:.4f} {'✅ Good' if trust_score > 0.87 else '⚠️ Moderate' if trust_score > 0.7 else '❌ Poor'}")
-                    
-                    # Compute distance correlation between high-D and low-D spaces
-                    from scipy.spatial.distance import pdist
-                    from scipy.stats import pearsonr
-                    high_d_distances = pdist(preprocessed_embeddings, metric='euclidean')
-                    low_d_distances = pdist(combined_umap_2d, metric='euclidean')
-                    distance_corr, _ = pearsonr(high_d_distances, low_d_distances)
-                    print(f"Distance correlation: {distance_corr:.4f} {'✅ Good' if distance_corr > 0.6 else '⚠️ Moderate' if distance_corr > 0.3 else '❌ Poor'}")
-                    
-                    # Compute continuity (how well local structure is preserved)
-                    from sklearn.neighbors import NearestNeighbors
-                    k = min(5, len(combined_embeddings) - 1)
-                    nbrs_high = NearestNeighbors(n_neighbors=k+1, metric='euclidean').fit(preprocessed_embeddings)
-                    nbrs_low = NearestNeighbors(n_neighbors=k+1, metric='euclidean').fit(combined_umap_2d)
-                    
-                    _, indices_high = nbrs_high.kneighbors(preprocessed_embeddings)
-                    _, indices_low = nbrs_low.kneighbors(combined_umap_2d)
-                    
-                    # Calculate continuity: how many high-D neighbors remain neighbors in low-D
-                    continuity_scores = []
-                    for i in range(len(preprocessed_embeddings)):
-                        high_neighbors = set(indices_high[i][1:])  # Exclude self
-                        low_neighbors = set(indices_low[i][1:])    # Exclude self
-                        overlap = len(high_neighbors.intersection(low_neighbors))
-                        continuity_scores.append(overlap / k)
-                    
-                    continuity = np.mean(continuity_scores)
-                    print(f"Continuity (k={k}): {continuity:.4f} {'✅ Good' if continuity > 0.7 else '⚠️ Moderate' if continuity > 0.5 else '❌ Poor'}")
-                    
-                    # Overall assessment
-                    if trust_score > 0.87 and distance_corr > 0.6:
-                        print("📊 Overall: Excellent projection quality")
-                    elif trust_score > 0.75 and distance_corr > 0.4:
-                        print("📊 Overall: Good projection quality")
-                    elif trust_score > 0.65 and distance_corr > 0.25:
-                        print("📊 Overall: Moderate projection quality - some distortion expected")
-                    else:
-                        print("📊 Overall: Poor projection quality - significant distortion present")
-                        print("💡 Consider: More PCA components, different UMAP parameters, or MetricMDS")
-                        
-                except ImportError as e:
-                    print(f"Some diagnostics unavailable: {e}")
-                except Exception as e:
-                    print(f"Error computing diagnostics: {e}")
-                print("=" * 40)
-            
-            # Verify the query projections are reasonable
-            if len(query_projections) > 0:
-                proto_x_range = (np.min(umap_2d[:, 0]), np.max(umap_2d[:, 0]))
-                proto_y_range = (np.min(umap_2d[:, 1]), np.max(umap_2d[:, 1]))
-                query_x_range = (np.min(query_projections[:, 0]), np.max(query_projections[:, 0]))
-                query_y_range = (np.min(query_projections[:, 1]), np.max(query_projections[:, 1]))
-                
-                print(f"Prototype UMAP range: X={proto_x_range}, Y={proto_y_range}")
-                print(f"Query UMAP range: X={query_x_range}, Y={query_y_range}")
-        else:
-            query_projections = None
-
-        # Build hierarchy and hue map first to get all node names
-        categories = ann["categories"]
-        hierarchy = HierarchyTree(ann["taxonomy"])
-        hue_map = build_hue_map(hierarchy.root)
-        
-        # Get ALL hierarchy node names (both leaf and parent nodes)
-        all_hierarchy_nodes = []
-        def collect_nodes(node):
-            all_hierarchy_nodes.append(node.name)
-            for child in node.children:
-                collect_nodes(child)
-        collect_nodes(hierarchy.root)
-        
-        # Use ALL embeddings (116) and map them to ALL hierarchy nodes
-        if len(embeddings) != len(all_hierarchy_nodes):
-            print(f"Using all {len(embeddings)} embeddings for {len(all_hierarchy_nodes)} hierarchy nodes")
-        
-        # The labels should be ALL hierarchy nodes, not just categories
-        labels = all_hierarchy_nodes
-        
-        # Create coordinate mapping for ALL nodes that have embeddings
-        node_name_to_umap_coords = {}
-        for i, name in enumerate(labels):
-            if i < len(umap_2d) and name in hierarchy.class_to_node:
-                node_name_to_umap_coords[name] = umap_2d[i]
-
-        return embeddings, reducer, hierarchy, hue_map, labels, node_name_to_umap_coords, query_projections
-
-    except Exception as e:
-        print(f"Error in load_embeddings_and_umap: {e}")
-        traceback.print_exc()
+    if model is None or hierarchy is None or labels_from_ann is None or embeddings_from_load is None:
+        print("Error: Failed to load initial model, hierarchy, labels, or prototype embeddings. Exiting load_embeddings_and_umap.")
         return None, None, None, None, None, None, None
+
+    # 'embeddings' from here on refers to the prototype embeddings loaded/extracted
+    current_prototype_embeddings = embeddings_from_load
+
+    # Perform dimensionality reduction and validation
+    projection_model_reducer, combined_2d_projections, _ = _perform_dimensionality_reduction_and_validation(
+        current_prototype_embeddings,
+        query_embeddings, # Pass the original query_embeddings if available
+        model,            # Pass the loaded model for model-aware validation
+        labels_from_ann,  # Pass labels corresponding to current_prototype_embeddings
+        detection_examples, # Pass detection examples for validation
+        random_state,
+        use_mds
+    )
+        
+    if combined_2d_projections is None:
+        print("Error: Dimensionality reduction pipeline failed.")
+        return None, None, hierarchy, None, None, None, None # Return hierarchy as it was loaded
+
+    # Split projections back into prototype and query parts
+    num_prototypes = len(current_prototype_embeddings)
+    prototype_2d_projections = combined_2d_projections[:num_prototypes]
+    
+    query_2d_projections_result = None
+    if query_embeddings is not None and len(query_embeddings) > 0 and len(combined_2d_projections) > num_prototypes:
+        query_2d_projections_result = combined_2d_projections[num_prototypes:]
+        print(f"Split UMAP/MDS results: {len(prototype_2d_projections)} prototype projections, {len(query_2d_projections_result)} query projections")
+        
+        # Verify the query projections are reasonable
+        if len(query_2d_projections_result) > 0:
+            proto_x_range = (np.min(prototype_2d_projections[:, 0]), np.max(prototype_2d_projections[:, 0]))
+            proto_y_range = (np.min(prototype_2d_projections[:, 1]), np.max(prototype_2d_projections[:, 1]))
+            query_x_range = (np.min(query_2d_projections_result[:, 0]), np.max(query_2d_projections_result[:, 0]))
+            query_y_range = (np.min(query_2d_projections_result[:, 1]), np.max(query_2d_projections_result[:, 1]))
+            print(f"Prototype UMAP/MDS range: X={proto_x_range}, Y={proto_y_range}")
+            print(f"Query UMAP/MDS range: X={query_x_range}, Y={query_y_range}")
+    else:
+        print("No query embeddings were projected or projection result length mismatch.")
+
+
+    # Build hierarchy and hue map first to get all node names
+    hue_map = build_hue_map(hierarchy.root)
+    
+    # Get ALL hierarchy node names
+    all_hierarchy_nodes_names = []
+    def collect_node_names_recursive(node):
+        all_hierarchy_nodes_names.append(node.name)
+        for child in node.children:
+            collect_node_names_recursive(child)
+    collect_node_names_recursive(hierarchy.root)
+    
+    node_name_to_umap_coords = {}
+    for i, name in enumerate(labels_from_ann): # Iterate through the labels that match current_prototype_embeddings
+        if i < len(prototype_2d_projections): # Ensure we don't go out of bounds
+            node_name_to_umap_coords[name] = prototype_2d_projections[i]
+        else:
+            print(f"Warning: Mismatch between labels_from_ann and prototype_2d_projections length. Label: {name} at index {i} has no projection.")
+
+
+    final_proj_labels = all_hierarchy_nodes_names # For consistency with how calculate_visual_attributes uses it.
+
+    return current_prototype_embeddings, projection_model_reducer, hierarchy, hue_map, final_proj_labels, node_name_to_umap_coords, query_2d_projections_result
 
 
 def calculate_visual_attributes(hierarchy: HierarchyTree, 
@@ -2459,78 +1927,6 @@ def calculate_visual_attributes(hierarchy: HierarchyTree,
         edge_colors.append(depth_cmap(norm_depth))
             
     return filtered_labels, filtered_coords, marker_sizes, fill_colors, edge_colors, min_depth, max_depth
-
-
-def plot_prototype_scatter(ax: Axes, 
-                          filtered_coords: np.ndarray, 
-                          marker_sizes: np.ndarray, 
-                          fill_colors: List[Any], 
-                          edge_colors: List[Any], 
-                          filtered_labels: List[str],
-                          viz_manager: Optional['VisualizationManager'] = None):
-    """
-    Plot UMAP scatter points with publication-quality styling and improved readability.
-    Labels all nodes.
-    
-    Args:
-        ax: Matplotlib axes to plot on
-        filtered_coords: Coordinates for each prototype (N, 2)
-        marker_sizes: Marker sizes for each prototype (N,)
-        fill_colors: Fill colors for each prototype
-        edge_colors: Edge colors for each prototype  
-        filtered_labels: Label text for each prototype
-        viz_manager: Optional VisualizationManager for consistent styling
-    """
-    if filtered_coords.size == 0 or marker_sizes.size == 0:
-        print("Warning: No data to plot in plot_prototype_scatter.")
-        return
-
-    base_scale = 1.4 if viz_manager else 1.3
-    adjusted_sizes = marker_sizes * base_scale
-    
-    ax.scatter(
-        filtered_coords[:, 0], filtered_coords[:, 1],
-        s=adjusted_sizes,
-        c=fill_colors,
-        edgecolors=edge_colors,
-        linewidths=2.2,
-        alpha=0.95,
-        zorder=6
-    )
-
-    texts = []
-    # Iterate through all filtered_labels to create text objects
-    for i in range(len(filtered_labels)):
-        if i < len(filtered_coords): # Ensure coordinate exists
-            (x, y) = filtered_coords[i]
-            lbl = filtered_labels[i]
-            
-            # Dynamic font sizing (optional, you can set a fixed size)
-            current_marker_size = adjusted_sizes[i] if i < len(adjusted_sizes) else np.mean(adjusted_sizes)
-            font_size = max(7, min(10, 9 - 0.02 * np.sqrt(current_marker_size))) # Adjusted for potentially more labels
-            
-            texts.append(ax.text(
-                x, y, lbl,
-                fontsize=font_size, 
-                color='#333333', # Dark gray for good contrast
-                fontweight='normal',
-                zorder=7 
-            ))
-    
-    if texts:
-        try:
-            adjust_text(
-                texts,
-                ax=ax,
-                # arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.7), # Can enable if desired
-                expand_points=(1.2, 1.2), 
-                expand_text=(1.2, 1.2),
-                force_points=0.2, 
-                force_text=0.3,
-                lim=500 # More iterations for potentially more labels
-            )
-        except Exception as e:
-            print(f"Could not adjust text labels: {e}")
 
 
 def plot_taxonomy_skeleton(ax: Axes, 
@@ -2691,59 +2087,6 @@ def plot_convex_hulls(ax: Axes,
 # Detection Example Extraction and Processing
 # -----------------------------------------------------------------------------
 
-def add_text_annotation(ax: Axes, x: float, y: float, 
-                       gt_leaf: str, pred_node: str, fallback_level: int, 
-                       confidence: float):
-    """
-    Add professional text annotation for detection examples.
-    
-    Args:
-        ax: Matplotlib axes to add text to
-        x: X coordinate for text placement
-        y: Y coordinate for text placement
-        gt_leaf: Ground truth class name
-        pred_node: Predicted class name
-        fallback_level: Hierarchical fallback level (0-5)
-        confidence: Prediction confidence score
-    """
-    # Get fallback level styling
-    encoding = get_fallback_visual_encoding(fallback_level)
-    text_color = encoding['color']
-    
-    # Format label text with improved readability
-    label_text = f"GT: {gt_leaf}\nPred: {pred_node}\nConf: {confidence:.2f}"
-    
-    # Create light background color with better contrast
-    rgb_color = mcolors.to_rgb(text_color)
-    light_color_rgb = tuple([min(1.0, c * 0.2 + 0.8) for c in rgb_color])
-    
-    # Professional text box styling
-    text_box = dict(
-        boxstyle='round,pad=0.4,rounding_size=0.3',
-        facecolor=light_color_rgb,
-        edgecolor=text_color,
-        alpha=0.85,
-        linewidth=2.0
-    )
-    
-    # Add text with enhanced styling
-    text = ax.text(
-        x, y, label_text,
-        fontsize=8.5,
-        color='black',
-        weight='bold',
-        ha='center', va='top',
-        zorder=11,
-        linespacing=1.2,
-        bbox=text_box
-    )
-    
-    # Add text outline for better readability
-    text.set_path_effects([
-        path_effects.withStroke(linewidth=0.8, foreground='white')
-    ])
-
-
 def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings, 
                                         hierarchy: HierarchyTree, labels: List[str],
                                         num_examples: int = 20, min_score: float = 0.3,
@@ -2770,7 +2113,7 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     if not results_with_embeddings:
         return []
     
-    # DEBUG: Check prototype embeddings characteristics
+    # Check prototype embeddings characteristics
     print(f"\n=== PROTOTYPE EMBEDDINGS DEBUG ===")
     print(f"Prototype embeddings shape: {prototype_embeddings.shape}")
     print(f"Prototype mean norm: {np.mean(np.linalg.norm(prototype_embeddings, axis=1)):.4f}")
@@ -2930,121 +2273,6 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     
     # Ensure we return exactly the requested number
     return examples[:num_examples]
-
-
-from typing import Any, Dict, List, Optional, Tuple, Set
-import numpy as np
-# Ensure these (or similar) imports are present in your file:
-# from hod.utils.tree import HierarchyTree, HierarchyNode
-# from mmdet.structures import DetDataSample # Or the actual type of 'result'
-
-def prepare_data_for_subtree_visualization(
-    all_prototype_data: List[Dict[str, Any]],  # List of {'node_name': str, 'embedding': np.ndarray, ...}
-    all_query_results: List[Dict[str, Any]],   # The output of run_inference_with_hooks
-    hierarchy_tree: Any, # Instance of HierarchyTree
-    focus_node_name: Optional[str], # Made Optional, can be None
-    model_class_labels: List[str]  # List mapping model output indices to class/node names
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Prepares and filters prototype and query data for visualizing a specific subtree.
-    If focus_node_name is None, it returns all data (for the full plot).
-
-    Args:
-        all_prototype_data: A list of dictionaries, where each dictionary
-                            represents a prototype and contains at least 'node_name' (str)
-                            and 'embedding' (np.ndarray).
-        all_query_results: The list of results from run_inference_with_hooks.
-                           Each item is a dictionary containing image path, ground truth,
-                           and inference results (including predicted instances with embeddings).
-        hierarchy_tree: An instance of the HierarchyTree.
-        focus_node_name: The name of the node to focus the visualization on.
-                         If None, all data is returned.
-        model_class_labels: A list of class name strings, where the index
-                            corresponds to the model's output label index.
-
-    Returns:
-        A tuple containing:
-        - filtered_prototype_data: List of prototype dicts.
-        - filtered_query_detections: List of query detection dicts.
-    """
-    filtered_prototype_data: List[Dict[str, Any]] = []
-    filtered_query_detections: List[Dict[str, Any]] = []
-
-    subtree_node_names: Optional[Set[str]] = None
-
-    if focus_node_name:
-        focus_node = hierarchy_tree.class_to_node.get(focus_node_name) # Use class_to_node
-        if not focus_node:
-            print(f"Warning: Focus node '{focus_node_name}' not found in the hierarchy. Plotting all data.")
-        else:
-            # descendants() in your tree.py includes the node itself
-            subtree_node_names = set(focus_node.descendants())
-            print(f"Focusing on subtree for node: '{focus_node_name}'. Found {len(subtree_node_names)} nodes in subtree.")
-    else:
-        print("No focus node specified. Preparing data for all nodes.")
-
-    # 1. Filter prototype data
-    for prototype in all_prototype_data:
-        if subtree_node_names is None or prototype.get('node_name') in subtree_node_names:
-            filtered_prototype_data.append(prototype)
-
-    # 2. Filter query detections
-    for image_result in all_query_results:
-        # Ensure 'result' key and 'pred_instances' attribute exist
-        if 'result' not in image_result or not hasattr(image_result['result'], 'pred_instances'):
-            # print(f"Warning: Skipping image_result due to missing 'result' or 'pred_instances'. Keys: {image_result.keys()}")
-            continue
-            
-        pred_instances = image_result['result'].pred_instances
-        gt_instances_list = image_result.get('gt_instances', [])
-
-        if not hasattr(pred_instances, 'query_embeddings') or \
-           len(pred_instances.query_embeddings) != len(pred_instances.labels):
-            # print(f"Warning: Skipping image {image_result.get('image_path', 'Unknown')} due to missing/mismatched query_embeddings.")
-            continue
-        
-        query_embeddings_tensor = pred_instances.query_embeddings
-
-        for i in range(len(pred_instances.labels)):
-            pred_label_idx = pred_instances.labels[i].item()
-            
-            if not (0 <= pred_label_idx < len(model_class_labels)):
-                # print(f"Warning: Predicted label index {pred_label_idx} is out of bounds for model_class_labels (len {len(model_class_labels)}).")
-                continue
-            predicted_node_name = model_class_labels[pred_label_idx]
-
-            if subtree_node_names is None or predicted_node_name in subtree_node_names:
-                query_embedding = query_embeddings_tensor[i].cpu().numpy()
-                
-                gt_node_names_for_image = []
-                if gt_instances_list: # gt_instances is a list of dicts
-                    for gt_inst in gt_instances_list:
-                        # Assuming gt_inst is a dict and 'bbox_label' is the key for the label index
-                        gt_label_idx = gt_inst.get('bbox_label', -1) 
-                        if isinstance(gt_label_idx, int) and 0 <= gt_label_idx < len(model_class_labels):
-                            gt_node_names_for_image.append(model_class_labels[gt_label_idx])
-                
-                filtered_query_detections.append({
-                    'embedding': query_embedding,
-                    'predicted_node_name': predicted_node_name,
-                    'gt_node_names_on_image': gt_node_names_for_image,
-                    'score': pred_instances.scores[i].item(),
-                    'bbox': pred_instances.bboxes[i].cpu().numpy(),
-                    'image_path': image_result.get('image_path'),
-                    'image_idx': image_result.get('image_idx')
-                    # Fallback level calculation would happen later
-                })
-    
-    if focus_node_name:
-        print(f"Prepared data for focus node '{focus_node_name}': "
-              f"{len(filtered_prototype_data)} prototypes, "
-              f"{len(filtered_query_detections)} query detections.")
-    else:
-        print(f"Prepared data for all nodes: "
-              f"{len(filtered_prototype_data)} prototypes, "
-              f"{len(filtered_query_detections)} query detections.")
-
-    return filtered_prototype_data, filtered_query_detections
 
 
 def overlay_detection_thumbnails(ax: Axes, examples: List[Dict], disable_layout_adjustment: bool = False):
@@ -3343,9 +2571,6 @@ def plot_fallback_arrows(
     if not query_examples:
         print("No query examples provided for fallback arrows.")
         return
-
-    # For debugging, let's see a few keys from prototype_coords
-    # print(f"DEBUG: Sample keys in prototype_coords: {list(prototype_coords.keys())[:20]}")
 
 
     for idx, example in enumerate(query_examples): # Added enumerate for easier debugging
@@ -3758,7 +2983,8 @@ def generate_detection_projection_plot(
     min_score: float = 0.3,
     iou_threshold: float = 0.5,
     use_mds: bool = False,
-    focus_node_name: Optional[str] = None
+    focus_node_name: Optional[str] = None,
+    separate_panels: bool = False
 ):
     """
     Create a 3-panel visualization:
@@ -3813,15 +3039,29 @@ def generate_detection_projection_plot(
     
     query_embeddings_for_umap = np.array(query_embeddings_for_umap_list) if query_embeddings_for_umap_list else None
 
-    if not processed_all_detection_examples:
-        print("No valid detection examples with feature vectors collected. Cannot proceed.")
-        # Optionally, create an empty plot or just return
-        fig, ax = plt.subplots(1, 1, figsize=(12,12))
-        ax.text(0.5, 0.5, "No data to plot.", ha='center', va='center')
-        if save_path:
-            plt.savefig(save_path)
-            print(f"Empty plot saved to {save_path}")
-        plt.show()
+    if not processed_all_detection_examples and not proj_node_coords: # Check if there's anything to plot
+        print("No prototype or detection data to plot. Exiting.")
+        # Optionally create a truly empty plot or just return
+        if save_path and separate_panels: # If separate, maybe indicate no data for each panel
+             base_s, ext_s = os.path.splitext(save_path)
+             for i in range(1,4):
+                 fig_empty, ax_empty = plt.subplots(1, 1, figsize=(12,12))
+                 ax_empty.text(0.5, 0.5, f"No data for Panel {i}", ha='center', va='center')
+                 empty_path = f"{base_s}_panel{i}_nodata{ext_s}"
+                 fig_empty.savefig(empty_path)
+                 plt.close(fig_empty)
+                 print(f"Empty plot placeholder saved to {empty_path}")
+        elif save_path: # Combined empty plot
+             fig_empty, ax_empty = plt.subplots(1, 1, figsize=(12,12))
+             ax_empty.text(0.5, 0.5, "No data to plot.", ha='center', va='center')
+             empty_path = f"{save_path}_nodata.png" # Ensure different name
+             fig_empty.savefig(empty_path)
+             plt.close(fig_empty)
+             print(f"Empty plot placeholder saved to {empty_path}")
+        else:
+            plt.figure(figsize=(12,12))
+            plt.text(0.5,0.5, "No data to plot", ha='center', va='center')
+            plt.show()
         return
     
     print(f"Performing single joint projection with {len(prototype_embeddings_from_model)} prototypes + {len(query_embeddings_for_umap) if query_embeddings_for_umap is not None else 0} query embeddings...")
@@ -3855,89 +3095,141 @@ def generate_detection_projection_plot(
     # --- End of adapted data loading ---
 
     print("Calculating visual attributes for the main plot...")
-    depth_cmap = plt.get_cmap('cividis_r') # Or your preferred cmap
-
-    # Setup figure for 3 panels
-    fig, axes = plt.subplots(1, 3, figsize=(36, 12), dpi=120) # Adjusted figsize for 1x3
-    ax1, ax2, ax3 = axes.ravel()
+    depth_cmap = plt.get_cmap('cividis_r')
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig.patch.set_facecolor('white')
 
     projection_name = "MetricMDS" if use_mds else "UMAP"
     model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title()
 
-    # === Panel 1: Full Structure ===
-    plotted_nodes_p1, filtered_labels_p1, filtered_coords_p1, \
-    marker_sizes_p1, fill_colors_p1, edge_colors_p1 = _plot_panel1_full_structure(
-        ax1,
-        hierarchy,
-        proj_node_coords,
-        proj_labels,
-        hue_map,
-        depth_cmap,
-        processed_all_detection_examples,
-        num_examples_display_p1p3,
-        projection_name,
-        model_name_stem
+    # These visual attributes for Panel 1 are needed as input for Panel 2's call
+    # This calculation is done once.
+    _plotted_nodes_p1_base = set(proj_node_coords.keys() if proj_node_coords else {})
+    _attrs_p1_list_base = calculate_visual_attributes(
+        hierarchy, _plotted_nodes_p1_base, proj_node_coords if proj_node_coords else {}, proj_labels if proj_labels else [], hue_map if hue_map else {}, depth_cmap
     )
+    if len(_attrs_p1_list_base) == 7:
+        _filtered_labels_p1_base, _filtered_coords_p1_base, _marker_sizes_p1_base, \
+        _fill_colors_p1_base, _edge_colors_p1_base, _, _ = _attrs_p1_list_base
+    else:
+        print("Error: Base attributes for Panel 1 could not be calculated. Plotting may be incomplete.")
+        # Initialize to safe defaults to prevent crashes
+        _filtered_labels_p1_base, _filtered_coords_p1_base, _marker_sizes_p1_base = [], np.array([]), np.array([])
+        _fill_colors_p1_base, _edge_colors_p1_base = [], []
 
-    # === Panel 2: Parent + Ancestor Fallbacks ===
-    _plot_panel2_hierarchical_retreat(
-        ax2,
-        hierarchy,
-        proj_node_coords,
-        hue_map,
-        processed_all_detection_examples,
-        projection_name,
-        plotted_nodes_p1,
-        filtered_labels_p1,
-        filtered_coords_p1,
-        marker_sizes_p1,
-        fill_colors_p1,
-        edge_colors_p1
-    )
 
-    # === Panel 3: Interactive Subtree Zoom ===
-    _plot_panel3_subtree_zoom(
-        ax3,
-        hierarchy, # This is hierarchy_from_load
-        proj_node_coords, # Pass the full proj_node_coords
-        proj_labels,      # Pass the full proj_labels
-        hue_map,
-        depth_cmap,
-        processed_all_detection_examples,
-        num_examples_display_p1p3,
-        projection_name,
-        focus_node_name
-    )
+    panel_figsize = (14, 12) # Slightly adjusted for single panel titles and legends
+    timestamp = time.strftime("%Y%m%d-%H%M%S") # For unique filenames if needed
 
-    # Adjust layout for better spacing
-    fig.tight_layout(pad=3.0) # Increased padding
-    
-    # Save or show
-    if save_path:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
-        model_name_stem = pathlib.Path(model_path).stem.replace('_', ' ').title()
-        base, ext = os.path.splitext(save_path)
-        detailed_path = f"{base}_{model_name_clean}_3panel_{num_examples_display_p1p3}disp_{len(processed_all_detection_examples)}scan_{timestamp}{ext}"
+    if separate_panels:
+        # --- Plot Panel 1 Separately ---
+        fig1, ax1 = plt.subplots(1, 1, figsize=panel_figsize, dpi=120)
+        fig1.patch.set_facecolor('white')
+        # _plot_panel1_full_structure itself calls calculate_visual_attributes.
+        # We pass the necessary base data.
+        _plot_panel1_full_structure(
+            ax1, hierarchy, proj_node_coords if proj_node_coords else {}, proj_labels if proj_labels else [], hue_map if hue_map else {}, depth_cmap,
+            processed_all_detection_examples, num_examples_display_p1p3,
+            projection_name, model_name_stem
+        )
+        fig1.tight_layout(pad=2.0)
+        if save_path:
+            base, ext = os.path.splitext(save_path)
+            panel1_save_path = f"{base}_panel1_{timestamp}{ext}"
+            print(f"Saving Panel 1 to {panel1_save_path}")
+            fig1.savefig(panel1_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
+        plt.close(fig1)
+
+        # --- Plot Panel 2 Separately ---
+        fig2, ax2 = plt.subplots(1, 1, figsize=panel_figsize, dpi=120)
+        fig2.patch.set_facecolor('white')
+        _plot_panel2_hierarchical_retreat(
+            ax2, hierarchy, proj_node_coords if proj_node_coords else {}, hue_map if hue_map else {},
+            processed_all_detection_examples, projection_name,
+            _plotted_nodes_p1_base, _filtered_labels_p1_base, _filtered_coords_p1_base,
+            _marker_sizes_p1_base, _fill_colors_p1_base, _edge_colors_p1_base
+        )
+        fig2.tight_layout(pad=2.0)
+        if save_path:
+            base, ext = os.path.splitext(save_path)
+            panel2_save_path = f"{base}_panel2_{timestamp}{ext}"
+            print(f"Saving Panel 2 to {panel2_save_path}")
+            fig2.savefig(panel2_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
+        plt.close(fig2)
+
+        # --- Plot Panel 3 Separately ---
+        fig3, ax3 = plt.subplots(1, 1, figsize=panel_figsize, dpi=120)
+        fig3.patch.set_facecolor('white')
+        _plot_panel3_subtree_zoom(
+            ax3, hierarchy, proj_node_coords if proj_node_coords else {}, proj_labels if proj_labels else [], hue_map if hue_map else {}, depth_cmap,
+            processed_all_detection_examples, num_examples_display_p1p3,
+            projection_name, focus_node_name
+        )
+        fig3.tight_layout(pad=2.0)
+        if save_path:
+            base, ext = os.path.splitext(save_path)
+            panel3_save_path = f"{base}_panel3_{timestamp}{ext}"
+            print(f"Saving Panel 3 to {panel3_save_path}")
+            fig3.savefig(panel3_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
+        plt.close(fig3)
         
-        save_dir = os.path.dirname(detailed_path)
-        if save_dir: os.makedirs(save_dir, exist_ok=True)
+        if not save_path:
+             print("Separate panels generated. Interactive display for multiple separate plots is not enabled by default.")
+
+    else: # Combined plot
+        combined_figsize = (36, 12)
+        fig, axes = plt.subplots(1, 3, figsize=combined_figsize, dpi=120)
+        ax1, ax2, ax3 = axes.ravel()
+        fig.patch.set_facecolor('white')
+
+        # Panel 1
+        # _plot_panel1_full_structure returns attributes, which are then used by _plot_panel2
+        # Note: The _base attributes calculated earlier are identical to what this would return if inputs are same.
+        # For consistency, we use the _base attributes.
+        _plot_panel1_full_structure(
+            ax1, hierarchy, proj_node_coords if proj_node_coords else {}, proj_labels if proj_labels else [], hue_map if hue_map else {}, depth_cmap,
+            processed_all_detection_examples, num_examples_display_p1p3,
+            projection_name, model_name_stem
+        )
         
-        print(f"Saving 3-panel figure to {detailed_path}")
-        # Adjusted metadata: Removed P2 Arrows count as it's no longer directly available here
-        metadata = {
-            'Title': f'3-Panel UMAP visualization with {num_examples_display_p1p3} displayed examples (P1/P3)',
-            'Author': 'Hierarchical Object Detection',
-            'Description': f'Model: {model_name_stem}, Examples Scanned: {len(processed_all_detection_examples)}, P1/P3 Display: {num_examples_display_p1p3}, Focus: {focus_node_name or "None"}, Date: {timestamp}',
-            'Keywords': 'UMAP, embeddings, object detection, hierarchy, multi-panel'
-        }
-        fig.savefig(detailed_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3, metadata=metadata)
-        # Adjusted print statement
-        print(f"Figure saved. Scanned {len(processed_all_detection_examples)} examples. Displayed {num_examples_display_p1p3} in P1/P3.")
-    
-    plt.show()
+        # Panel 2
+        _plot_panel2_hierarchical_retreat(
+            ax2, hierarchy, proj_node_coords if proj_node_coords else {}, hue_map if hue_map else {},
+            processed_all_detection_examples, projection_name,
+            _plotted_nodes_p1_base, _filtered_labels_p1_base, _filtered_coords_p1_base,
+            _marker_sizes_p1_base, _fill_colors_p1_base, _edge_colors_p1_base
+        )
+        
+        # Panel 3
+        _plot_panel3_subtree_zoom(
+            ax3, hierarchy, proj_node_coords if proj_node_coords else {}, proj_labels if proj_labels else [], hue_map if hue_map else {}, depth_cmap,
+            processed_all_detection_examples, num_examples_display_p1p3,
+            projection_name, focus_node_name
+        )
+
+        fig.tight_layout(pad=3.0)
+        
+        if save_path:
+            model_name_clean = os.path.basename(model_path).replace('.', '_').replace(' ', '_')
+            base, ext = os.path.splitext(save_path) # save_path is already args.save_dir/args.save_name
+            
+            # Construct a descriptive name for the combined plot
+            scan_count = len(processed_all_detection_examples) if processed_all_detection_examples else 0
+            detailed_path = f"{base}_{model_name_clean}_3panel_combined_{num_examples_display_p1p3}disp_{scan_count}scan_{timestamp}{ext}"
+            
+            save_dir_actual = os.path.dirname(detailed_path)
+            if save_dir_actual: os.makedirs(save_dir_actual, exist_ok=True)
+            
+            print(f"Saving combined 3-panel figure to {detailed_path}")
+            metadata = {
+                'Title': f'Combined 3-Panel {projection_name} visualization',
+                'Author': 'Hierarchical Object Detection Analysis',
+                'Description': f'Model: {model_name_stem}, Examples Scanned: {scan_count}, P1/P3 Display: {num_examples_display_p1p3}, Focus: {focus_node_name or "None"}, Date: {timestamp}',
+                'Keywords': f'{projection_name}, embeddings, object detection, hierarchy, multi-panel'
+            }
+            fig.savefig(detailed_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3, metadata=metadata)
+            print(f"Combined figure saved. Scanned {scan_count} examples. Displayed {num_examples_display_p1p3} in P1/P3.")
+        
+        plt.show()
 
 
 # -----------------------------------------------------------------------------
@@ -3951,10 +3243,8 @@ def parse_args():
     parser.add_argument('--model-path', required=True, help='Path to trained model checkpoint')
     parser.add_argument('--save-name', default='combined_umap_visualization.png', 
                        help='Name of the saved figure (default: combined_umap_visualization.png)')
-    # Changed from num-examples to num-examples-display
     parser.add_argument('--num-examples-display', type=int, default=20, 
                        help='Number of detection example thumbnails to display in Panel 1 and 3 (default: 20)')
-    # New argument for total examples to scan
     parser.add_argument('--num-examples-scan', type=int, default=80,
                        help='Total number of diverse examples to scan/collect for populating all panels (default: 80)')
     parser.add_argument('--random-state', type=int, default=42,
@@ -3966,13 +3256,10 @@ def parse_args():
     parser.add_argument('--use-mds', action='store_true',
                        help='Use MetricMDS instead of UMAP for better distance preservation (slower but more accurate)')
     
-    # Three-panel visualization options
-    parser.add_argument('--three-panel', action='store_true',
-                       help='Create 3-panel visualization: (1) Full structure, (2) Hierarchical arrows, (3) Subtree focus')
     parser.add_argument('--focus-node', type=str, default=None,
-                       help='Node name to focus on for subtree visualization (auto-selected if not provided)')
-    parser.add_argument('--panel-type', choices=['full', 'arrows', 'subtree'], default='full',
-                       help='Type of single panel to create (default: full)')
+                       help='Node name to focus on for subtree visualization (Panel 3)')
+    parser.add_argument('--separate-panels', action='store_true',
+                       help='Save each of the three panels as a separate image file instead of a single combined image.')
     
     args = parser.parse_args()
     return args
@@ -3997,7 +3284,8 @@ def main():
         min_score=args.min_score,
         iou_threshold=args.iou_threshold,
         use_mds=args.use_mds,
-        focus_node_name=args.focus_node
+        focus_node_name=args.focus_node,
+        separate_panels=args.separate_panels
     )
 
 
