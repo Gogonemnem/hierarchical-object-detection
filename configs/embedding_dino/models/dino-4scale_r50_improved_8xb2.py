@@ -28,11 +28,20 @@ model_wrapper_cfg = dict(
     type='MMDistributedDataParallel',
     find_unused_parameters=True
 )
-
+data_root = 'data/aircraft/'
 model = dict(
     bbox_head=dict(
         type='EmbeddingDINOHead',
         num_classes=81,
+        ann_file=data_root + 'aircraft_test.json',
+        cls_curvature=0.0,
+        share_cls_layer=False,
+        cls_config=dict(
+            use_bias=True,
+            use_temperature=True,
+            init_norm_upper_offset=0.5,
+            freeze_embeddings=False,
+        ),
     ),
 )
 
