@@ -60,10 +60,10 @@ def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
     # Define your taxonomy (only once, as metadata)
     taxonomy = {
         "Military Aircraft": {
-            "Fixed-Wing Aircraft": {
-                "Combat Aircraft": {
-                    "Fighters and Multirole": {
-                        "American Fighters": {
+            "Fixed-Wing": {
+                "Combat": {
+                    "Fighters": {
+                        "US Fighters": {
                             "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}
                         },
                         "Russian Fighters": {
@@ -80,20 +80,16 @@ def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
                         "A10": {}, "AV8B": {}, "EMB314": {}, "Su25": {}
                     },
                     "Bombers": {
-                        "American Bombers": {
+                        "US Bombers": {
                             "B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}
                         },
                         "Russian Bombers": {
                             "Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}
                         },
-                        "Chinese Bombers": {
-                            "H6": {}
-                        },
-                        "British Bombers": {
-                            "Vulcan": {}
-                        }
+                        "H6": {},
+                        "Vulcan": {}
                     },
-                    "Reconnaissance and Surveillance": {
+                    "Surveillance": {
                         "Airborne Early Warning": {
                             "E2": {}, "E7": {}, "KJ600": {}
                         },
@@ -105,52 +101,50 @@ def cvt_to_coco_json(split_to_images, subtract_one=True, use_all_nodes=False):
                         }
                     }
                 },
-                "Transport and Utility": {
+                "Utility": {
                     "Cargo Transports": {
-                        "American Cargo Transports": {
+                        "American Cargo": {
                             "C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}
                         },
-                        "European Cargo Transports": {
+                        "European Cargo": {
                             "A400M": {}
                         },
-                        "Latin American Cargo Transports": {
+                        "Latin American Cargo": {
                             "C390": {}
                         },
-                        "Russian Cargo Transports": {
+                        "Russian Cargo": {
                             "An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}
                         },
-                        "Chinese Cargo Transports": {
-                            "Y20": {}
-                        }
+                        "Y20": {}
                     },
                     "Amphibious Aircraft": {
                         "AG600": {}, "Be200": {}, "CL415": {}, "US2": {}
                     }
+                },
+                "UAV": {
+                    "Combat and Reconnaissance Drones": {
+                        "MQ9": {}, "RQ4": {}
+                    },
+                    "Tactical UAVs": {
+                        "TB001": {}, "TB2": {}
+                    }
+                },
+                "Tiltrotor": {
+                    "V22": {}, "V280": {}
                 }
             },
             "Rotorcraft": {
                 "Attack Helicopters": {
                     "AH64": {}, "Ka52": {}, "Mi24": {}, "Mi28": {}, "Z10": {}
                 },
-                "Utility and Transport Helicopters": {
+                "Utility Helicopters": {
                     "Land-Based Helicopters": {
                         "CH47": {}, "Mi8": {}, "Mi26": {}, "UH60": {}
                     },
-                    "Naval and Specialized Helicopters": {
+                    "Specialized Helicopters": {
                         "Ka27": {}, "Z19": {}
                     }
                 }
-            },
-            "Unmanned Aerial Vehicles": {
-                "Combat and Reconnaissance Drones": {
-                    "MQ9": {}, "RQ4": {}
-                },
-                "Tactical UAVs": {
-                    "TB001": {}, "TB2": {}
-                }
-            },
-            "Tiltrotor Aircraft": {
-                "V22": {}, "V280": {}
             }
         }
     }
