@@ -154,12 +154,12 @@ def build_nested_boundaries(flat_tax):
     return flat_tax_sorted, boundaries_per_level
 
 
-def _get_group_for_leaf(leaf_label: str, tree: HierarchyTree, agg_level: int) -> str:
+def _get_node_group_at_agg_level(node_label: str, tree: HierarchyTree, agg_level: int) -> str:
     """
-    Determines the group name for a given leaf label based on the aggregation level.
+    Determines the group name for a given node label based on the aggregation level.
 
     Args:
-        leaf_label: The name of the leaf class.
+        node_label: The name of the node (can be leaf or internal).
         tree: The HierarchyTree object representing the taxonomy.
         agg_level: The target depth for aggregation (0-indexed).
                    Nodes at this depth will form the groups.
@@ -167,67 +167,68 @@ def _get_group_for_leaf(leaf_label: str, tree: HierarchyTree, agg_level: int) ->
     Returns:
         The name of the group class.
     """
-    if leaf_label not in tree.class_to_node:
-        # This should not happen if leaf_label comes from tree-aware processing
-        return leaf_label # Fallback: leaf is its own group
+    if node_label not in tree.class_to_node:
+        # This should not happen if node_label comes from tree-aware processing
+        return node_label # Fallback: node is its own group
 
-    # path_ancestors is the list of ancestor names: [root, child_of_root, ..., parent_of_leaf]
-    path_ancestors = tree.get_ancestors(leaf_label)
+    # path_ancestors is the list of ancestor names: [root, child_of_root, ..., parent_of_node]
+    path_ancestors = tree.get_ancestors(node_label)
     
-    # leaf_depth is the depth of the leaf itself. Root is at depth 0.
-    # A leaf whose parent is the root has depth 1. path_ancestors = [root], len=1.
-    # A leaf whose grandparent is the root has depth 2. path_ancestors = [root, parent], len=2.
-    leaf_depth = len(path_ancestors) 
+    # node_depth is the depth of the node itself. Root is at depth 0.
+    # A node whose parent is the root has depth 1. path_ancestors = [root], len=1.
+    # A node whose grandparent is the root has depth 2. path_ancestors = [root, parent], len=2.
+    node_depth = len(path_ancestors) 
 
-    if not path_ancestors and leaf_label == tree.root.name: # leaf_label is the root
-        return leaf_label
+    if not path_ancestors and node_label == tree.root.name: # node_label is the root
+        return node_label
 
-    if agg_level < leaf_depth:
-        # The leaf is strictly deeper than the aggregation level.
+    if agg_level < node_depth:
+        # The node is strictly deeper than the aggregation level.
         # Group it by its ancestor at the specified aggregation depth.
         # e.g., agg_level=0 means group by root (path_ancestors[0])
         group_name = path_ancestors[agg_level]
         return group_name
-    else: # agg_level >= leaf_depth
-        # The leaf is at or shallower than the aggregation level.
-        # It means this leaf should be its own distinct group at this level of detail.
-        return leaf_label
+    else: # agg_level >= node_depth
+        # The node is at or shallower than the aggregation level.
+        # It means this node should be its own distinct group at this level of detail.
+        return node_label
 
 
 def aggregate_confusion_matrix(
     original_cm: np.ndarray,
     tree: HierarchyTree,
     agg_level: int,
-    leaf_labels_in_cm_order: list
+    node_labels_in_cm_order: list
 ) -> tuple:
     """
     Aggregates a confusion matrix based on a hierarchical taxonomy.
 
     Args:
         original_cm: The input confusion matrix. Assumed to have classes corresponding
-                     to leaf_labels_in_cm_order, with the last row/col being 'background'.
+                     to node_labels_in_cm_order, with the last row/col being 'background'.
+                     These can be leaf or non-leaf nodes.
         tree: The HierarchyTree object.
         agg_level: The target depth for aggregation (0-indexed).
-        leaf_labels_in_cm_order: Ordered list of leaf class names as they appear
-                                 in the original_cm (excluding 'background').
+        node_labels_in_cm_order: Ordered list of node class names (leaf or non-leaf)
+                                 as they appear in the original_cm (excluding 'background').
 
     Returns:
         A tuple containing:
         - aggregated_cm (np.ndarray): The new aggregated confusion matrix.
         - aggregated_labels (List[str]): The labels for the aggregated matrix (including 'background').
     """
-    num_original_classes = len(leaf_labels_in_cm_order)
-    if original_cm.shape != (num_original_classes + 1, num_original_classes + 1):
+    num_original_nodes = len(node_labels_in_cm_order)
+    if original_cm.shape != (num_original_nodes + 1, num_original_nodes + 1):
         raise ValueError(
             f"Original CM shape {original_cm.shape} does not match "
-            f"number of leaf labels {num_original_classes} + background."
+            f"number of node labels {num_original_nodes} + background."
         )
 
-    leaf_to_group_map = {}
-    for leaf_label in leaf_labels_in_cm_order:
-        leaf_to_group_map[leaf_label] = _get_group_for_leaf(leaf_label, tree, agg_level)
+    node_to_group_map = {}
+    for node_label in node_labels_in_cm_order:
+        node_to_group_map[node_label] = _get_node_group_at_agg_level(node_label, tree, agg_level)
 
-    unique_group_names = sorted(list(set(leaf_to_group_map.values())))
+    unique_group_names = sorted(list(set(node_to_group_map.values())))
     aggregated_labels_no_bg = unique_group_names
     aggregated_labels_with_bg = aggregated_labels_no_bg + ['background']
     
@@ -235,27 +236,30 @@ def aggregate_confusion_matrix(
     num_aggregated_classes = len(aggregated_labels_no_bg)
     aggregated_cm = np.zeros((num_aggregated_classes + 1, num_aggregated_classes + 1), dtype=original_cm.dtype)
 
-    for i in range(num_original_classes):
-        original_gt_leaf = leaf_labels_in_cm_order[i]
-        new_gt_group = leaf_to_group_map[original_gt_leaf]
+    for i in range(num_original_nodes):
+        original_gt_node = node_labels_in_cm_order[i]
+        new_gt_group = node_to_group_map[original_gt_node]
         new_gt_idx = group_to_idx_map[new_gt_group]
 
-        for j in range(num_original_classes):
-            original_pred_leaf = leaf_labels_in_cm_order[j]
-            new_pred_group = leaf_to_group_map[original_pred_leaf]
+        for j in range(num_original_nodes):
+            original_pred_node = node_labels_in_cm_order[j]
+            new_pred_group = node_to_group_map[original_pred_node]
             new_pred_idx = group_to_idx_map[new_pred_group]
             
             aggregated_cm[new_gt_idx, new_pred_idx] += original_cm[i, j]
 
-        aggregated_cm[new_gt_idx, num_aggregated_classes] += original_cm[i, num_original_classes]
+        # Handle background predictions for the current GT group
+        aggregated_cm[new_gt_idx, num_aggregated_classes] += original_cm[i, num_original_nodes]
 
-    for j in range(num_original_classes):
-        original_pred_leaf = leaf_labels_in_cm_order[j]
-        new_pred_group = leaf_to_group_map[original_pred_leaf]
+    # Handle GT background predictions against aggregated prediction groups
+    for j in range(num_original_nodes):
+        original_pred_node = node_labels_in_cm_order[j]
+        new_pred_group = node_to_group_map[original_pred_node]
         new_pred_idx = group_to_idx_map[new_pred_group]
-        aggregated_cm[num_aggregated_classes, new_pred_idx] += original_cm[num_original_classes, j]
+        aggregated_cm[num_aggregated_classes, new_pred_idx] += original_cm[num_original_nodes, j]
     
-    aggregated_cm[num_aggregated_classes, num_aggregated_classes] = original_cm[num_original_classes, num_original_classes]
+    # Sum of GT background to predicted background
+    aggregated_cm[num_aggregated_classes, num_aggregated_classes] = original_cm[num_original_nodes, num_original_nodes]
 
     return aggregated_cm, aggregated_labels_with_bg
 
