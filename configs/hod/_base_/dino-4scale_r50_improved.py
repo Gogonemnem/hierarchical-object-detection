@@ -1,6 +1,18 @@
 _base_ = [
     '../../_base_/default_runtime.py'
 ]
+
+# custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
+
+
+load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
+resume = False
+
+model_wrapper_cfg = dict(
+    type='MMDistributedDataParallel',
+    find_unused_parameters=True
+)
+
 model = dict(
     type='DINO',
     num_queries=900,  # num_matching_queries
@@ -17,7 +29,7 @@ model = dict(
         depth=50,
         num_stages=4,
         out_indices=(1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
         style='pytorch',
@@ -55,8 +67,8 @@ model = dict(
     positional_encoding=dict(
         num_feats=128,
         normalize=True,
-        offset=0.0,  # -0.5 for DeformDETR
-        temperature=20),  # 10000 for DeformDETR
+        offset=-0.5,
+        temperature=10000),
     bbox_head=dict(
         type='DINOHead',
         num_classes=80,
@@ -66,14 +78,14 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=1.0),  # 2.0 in DeformDETR
+            loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=5.0),
         loss_iou=dict(type='GIoULoss', loss_weight=2.0)),
     dn_cfg=dict(  # TODO: Move to model.train_cfg ?
         label_noise_scale=0.5,
         box_noise_scale=1.0,  # 0.4 for DN-DETR
         group_cfg=dict(dynamic=True, num_groups=None,
-                       num_dn_queries=100)),  # TODO: half num_dn_queries
+                       num_dn_queries=300)),  # TODO: half num_dn_queries
     # training and testing settings
     train_cfg=dict(
         assigner=dict(
@@ -84,37 +96,3 @@ model = dict(
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
     test_cfg=dict(max_per_img=300))  # 100 for DeformDETR
-
-# optimizer
-optim_wrapper = dict(
-    type='OptimWrapper',
-    optimizer=dict(
-        type='AdamW',
-        lr=0.0001,  # 0.0002 for DeformDETR
-        weight_decay=0.0001),
-    clip_grad=dict(max_norm=0.1, norm_type=2),
-    paramwise_cfg=dict(custom_keys={'backbone': dict(lr_mult=0.1)})
-)  # custom_keys contains sampling_offsets and reference_points in DeformDETR  # noqa
-
-# learning policy
-max_epochs = 12
-train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
-
-val_cfg = dict(type='ValLoop')
-test_cfg = dict(type='TestLoop')
-
-param_scheduler = [
-    dict(
-        type='MultiStepLR',
-        begin=0,
-        end=max_epochs,
-        by_epoch=True,
-        milestones=[11],
-        gamma=0.1)
-]
-
-# NOTE: `auto_scale_lr` is for automatically scaling LR,
-# USER SHOULD NOT CHANGE ITS VALUES.
-# base_batch_size = (8 GPUs) x (2 samples per GPU)
-auto_scale_lr = dict(enable=False, base_batch_size=16)
