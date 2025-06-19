@@ -2,8 +2,6 @@ _base_ = [
     './dino-4scale_r50_improved.py'
 ]
 
-# custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
-
 model = dict(
     bbox_head=dict(
         type='EmbeddingDINOHead',

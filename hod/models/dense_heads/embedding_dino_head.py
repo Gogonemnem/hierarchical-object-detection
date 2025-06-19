@@ -73,8 +73,9 @@ class EmbeddingDINOHead(DINOHead):
         self.use_contrastive = use_embed_loss and (loss_embed or {}).get('type', None) == "HierarchicalContrastiveLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
 
         self.tree = None
-        self.load_taxonomy(ann_file)
-        self._build_parent_children_index_map()
+        if ann_file:
+            self.load_taxonomy(ann_file)
+            self._build_parent_children_index_map()
 
         if self.use_cone and loss_embed:
             self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
@@ -84,7 +85,6 @@ class EmbeddingDINOHead(DINOHead):
         super().__init__(**kwargs)
 
         if use_embed_loss and loss_embed:
-            loss_embed['ann_file'] = ann_file
             self.loss_embed = MODELS.build(loss_embed)
 
     def load_taxonomy(self, ann_file):

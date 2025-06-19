@@ -2,8 +2,6 @@ _base_ = [
     './embedding-dino-4scale_r50_improved.py'
 ]
 
-# custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
-
 # data_root = path to the hierarchical dataset
 cls_decay = 3
 

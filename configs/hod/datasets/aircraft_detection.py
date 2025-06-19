@@ -2,8 +2,6 @@ _base_ = [
     '../../_base_/datasets/aircraft_detection.py'
 ]
 
-# custom_imports = dict(imports=['hod.datasets', 'hod.evaluation'], allow_failed_imports=False)
-
 # train_pipeline, NOTE the img_scale and the Pad's size_divisor is different
 # from the default setting in mmdet.
 train_pipeline = [
@@ -46,12 +44,3 @@ train_pipeline = [
 train_dataloader = dict(
     dataset=dict(
         filter_cfg=dict(filter_empty_gt=False), pipeline=train_pipeline))
-
-# Modify metric related settings
-val_evaluator = dict(
-    type='HierarchicalCocoMetric',
-    )
-test_evaluator = dict(
-    type='HierarchicalCocoMetric',
-    format_only=False,
-    )

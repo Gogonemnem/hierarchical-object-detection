@@ -2,9 +2,6 @@ _base_ = [
     '../../_base_/default_runtime.py'
 ]
 
-# custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
-
-
 load_from = "https://download.openmmlab.com/mmdetection/v3.0/dino/dino-4scale_r50_improved_8xb2-12e_coco/dino-4scale_r50_improved_8xb2-12e_coco_20230818_162607-6f47a913.pth"
 resume = False
 

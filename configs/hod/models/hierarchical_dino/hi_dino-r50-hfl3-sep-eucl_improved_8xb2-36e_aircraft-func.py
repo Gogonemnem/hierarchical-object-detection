@@ -9,10 +9,9 @@ custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], 
 data_root = 'data/aircraft/hierarchy_function/'
 model = dict(
     bbox_head=dict(
-        num_classes=113,
-        ann_file=data_root + 'aircraft_test.json',
+        num_classes=111,
         loss_cls=dict(
-            ann_file=data_root + 'aircraft_test.json',
+            ann_file=_base_.test_evaluator.ann_file,
         )
     ),
     # training and testing settings
@@ -23,7 +22,7 @@ model = dict(
                 dict(
                     type='HierarchicalFocalLossCost',
                     weight=2.0,
-                    ann_file=data_root + 'aircraft_test.json',
+                    ann_file=_base_.test_evaluator.ann_file,
                     decay=3,
                 ),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
