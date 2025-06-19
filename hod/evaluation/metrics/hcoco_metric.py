@@ -15,11 +15,12 @@ from hod.datasets.api_wrappers.hierarchical_coco import HierarchicalCOCOeval
 @METRICS.register_module()
 class HierarchicalCocoMetric(CocoMetric):
     def __init__(self,
+                 ann_file: str = '',
                  *args,
                  **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, ann_file=ann_file, **kwargs)
         self.classwise = False
-        self.taxonomy: dict = None
+        self.taxonomy: dict = load(ann_file).get('taxonomy', {})
 
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.
@@ -56,8 +57,6 @@ class HierarchicalCocoMetric(CocoMetric):
                 cat_names=self.dataset_meta['classes'])
         if self.img_ids is None:
             self.img_ids = self._coco_api.get_img_ids()
-        if self.taxonomy is None:
-            self.taxonomy = self.dataset_meta['taxonomy']
 
         # convert predictions to coco format and dump to json file
         result_files = self.results2json(preds, outfile_prefix)
