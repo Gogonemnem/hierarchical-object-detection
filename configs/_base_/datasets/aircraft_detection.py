@@ -43,6 +43,6 @@ test_dataloader = dict(
 test_evaluator = dict(
     type='CocoMetric',
     metric='bbox',
-    format_only=True,
+    format_only=False,
     ann_file=data_root + 'aircraft_test.json',
     outfile_prefix='./outputs/aircraft_detection/test',)
