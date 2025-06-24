@@ -91,6 +91,7 @@ def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes
     coco_files = {}
     for split, images in split_to_images.items():
         coco = {
+            'info': {},
             'images': [],
             'annotations': [],
             'categories': coco_cats,
