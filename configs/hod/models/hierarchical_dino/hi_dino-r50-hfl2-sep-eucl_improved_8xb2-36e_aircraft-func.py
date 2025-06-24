@@ -6,7 +6,6 @@ _base_ = [
 
 custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
 
-data_root = 'data/aircraft/hierarchy_function/'
 model = dict(
     bbox_head=dict(
         num_classes=111,
