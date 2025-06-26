@@ -1,5 +1,5 @@
 _base_ = [
-    './aircraft_hierarchy_fuction.py',
+    './aircraft_hierarchy_function.py',
 ]
 
 train_dataloader = dict(
