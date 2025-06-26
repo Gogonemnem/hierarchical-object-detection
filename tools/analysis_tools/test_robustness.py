@@ -75,13 +75,13 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument(
         '--final-prints',
         type=str,
         nargs='+',
         choices=['P', 'mPC', 'rPC'],
-        default='mPC',
+        default=['P', 'mPC', 'rPC'],
         help='corruption benchmark metric to print at the end')
     parser.add_argument(
         '--final-prints-aggregate',
