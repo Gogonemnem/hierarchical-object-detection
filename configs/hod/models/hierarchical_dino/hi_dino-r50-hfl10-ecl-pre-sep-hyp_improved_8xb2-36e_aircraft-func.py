@@ -8,11 +8,8 @@ custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], 
 
 model = dict(
     bbox_head=dict(
-        num_classes=111,
-        cls_config=dict(
-            use_bias=False,
-            use_temperature=False,
-        ),
+        num_classWes=111,
+        cls_curvature=-1,
         loss_embed=dict(
             type='EntailmentConeLoss',
             ann_file=_base_.test_evaluator.ann_file,
@@ -20,6 +17,7 @@ model = dict(
         ),
         loss_cls=dict(
             ann_file=_base_.test_evaluator.ann_file,
+            decay=10,
         )
     ),
     # training and testing settings
@@ -31,9 +29,14 @@ model = dict(
                     type='HierarchicalFocalLossCost',
                     weight=2.0,
                     ann_file=_base_.test_evaluator.ann_file,
-                    decay=3,
+                    decay=10,
                 ),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
+)
+
+# Prototype Pre-training Configuration
+prototype_pretrain_cfg = dict(
+    enable=True,
 )
