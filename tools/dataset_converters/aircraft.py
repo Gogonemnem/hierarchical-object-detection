@@ -6,6 +6,174 @@ from collections import defaultdict
 from mmengine.fileio import dump
 from mmengine.utils import mkdir_or_exist
 
+
+TAXONOMY_FUNCTION = {
+    "Military Aircraft": {
+        "Fixed-Wing": {
+            "Combat": {
+                "Fighters": {
+                    "US Fighters": {
+                        "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}
+                    },
+                    "Russian Fighters": {
+                        "Mig29": {}, "Mig31": {}, "Su57": {}
+                    },
+                    "Western Fighters": {
+                        "JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}
+                    },
+                    "Asian Fighters": {
+                        "J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}
+                    }
+                },
+                "Attack Aircraft": {
+                    "A10": {}, "AV8B": {}, "EMB314": {}, "Su25": {}
+                },
+                "Bombers": {
+                    "US Bombers": {
+                        "B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}
+                    },
+                    "Russian Bombers": {
+                        "Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}
+                    },
+                    "H6": {},
+                    "Vulcan": {}
+                },
+                "Surveillance": {
+                    "Airborne Early Warning": {
+                        "E2": {}, "E7": {}, "KJ600": {}
+                    },
+                    "High Altitude Reconnaissance": {
+                        "SR71": {}, "U2": {}
+                    },
+                    "Maritime Patrol": {
+                        "P3": {}, "WZ7": {}
+                    }
+                }
+            },
+            "Utility": {
+                "Cargo Transports": {
+                    "American Cargo": {
+                        "C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}
+                    },
+                    "Russian Cargo": {
+                        "An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}
+                    },
+                    "A400M": {},
+                    "C390": {},
+                    "Y20": {}
+                },
+                "Amphibious Aircraft": {
+                    "AG600": {}, "Be200": {}, "CL415": {}, "US2": {}
+                }
+            },
+            "UAV": {
+                "Combat and Reconnaissance Drones": {
+                    "MQ9": {}, "RQ4": {}
+                },
+                "Tactical UAVs": {
+                    "TB001": {}, "TB2": {}
+                }
+            },
+        },
+        "Rotorcraft": {
+            "Attack Helicopters": {
+                "AH64": {}, "Ka52": {}, "Mi24": {}, "Mi28": {}, "Z10": {}
+            },
+            "Utility Helicopters": {
+                "Land-Based Helicopters": {
+                    "CH47": {}, "Mi8": {}, "Mi26": {}, "UH60": {}
+                },
+                "Specialized Helicopters": {
+                    "Ka27": {}, "Z19": {}
+                }
+            }
+        },
+        "Tiltrotor": {
+            "V22": {}, "V280": {}
+        }
+    }
+}
+
+TAXONOMY_AREA = {
+    "Military Aircraft": {
+        "US Aircraft": {
+            "Fixed-Wing": {
+                "Combat": {
+                    "Fighters": {"F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}},
+                    "Attack Aircraft": {"A10": {}, "AV8B": {}},
+                    "Bombers": {"B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}},
+                    "Surveillance": {
+                        "E2": {},
+                        "High Altitude Reconnaissance": {"SR71": {}, "U2": {}},
+                        "P3": {}
+                    }
+                },
+                "Cargo Transports": {"C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}},
+                "US2": {},
+                "UAV": {"MQ9": {}, "RQ4": {}}
+            },
+            "Rotorcraft": {
+                "AH64": {},
+                "Utility Helicopters": {"CH47": {}, "UH60": {}}
+            },
+            "Tiltrotor": {"V22": {}, "V280": {}}
+        },
+        "Russian Aircraft": {
+            "Fixed-Wing": {
+                "Combat": {
+                    "Fighters": {"Mig29": {}, "Mig31": {}, "Su57": {}},
+                    "Su25": {},
+                    "Bombers": {"Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}}
+                },
+                "Cargo Transports": {"An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}},
+                "Be200": {}
+            },
+            "Rotorcraft": {
+                "Attack Helicopters": {"Ka52": {}, "Mi24": {}, "Mi28": {}},
+                "Utility Helicopters": {"Mi8": {}, "Mi26": {}, "Ka27": {}}
+            }
+        },
+        "European Aircraft": {
+            "Fixed-Wing": {
+                "Fighters": {"JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}},
+                "Vulcan": {},
+                "Utility": {
+                    "A400M": {},
+                    "CL415": {}
+                },
+                "TB2": {}
+            }
+        },
+        "Asian Aircraft": {
+            "Fixed-Wing": {
+                "Combat": {
+                    "Fighters": {"J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}},
+                    "Surveillance": {
+                        "KJ600": {},
+                        "WZ7": {}
+                    }
+                },
+                "Utility": {
+                    "Y20": {},
+                    "AG600": {}
+                },
+                "TB001": {}
+            },
+            "Rotorcraft": {
+                "Z10": {},
+                "Z19": {}
+            }
+        },
+        "Latin American Aircraft": {
+            "Fixed-Wing": {
+                "EMB314": {},
+                "C390": {}
+            }
+        }
+    }
+}
+
+
 def parse_csv(csv_file):
     """Parse the CSV file into a list of annotation dictionaries."""
     rows = []
@@ -21,6 +189,7 @@ def parse_csv(csv_file):
             row['ymax'] = int(row['ymax'])
             rows.append(row)
     return rows
+
 
 def group_annotations_by_image(rows):
     """
@@ -41,6 +210,7 @@ def group_annotations_by_image(rows):
         split_to_images[split][fname]['annotations'].append(row)
     return split_to_images
 
+
 def flatten_taxonomy(taxonomy, parent=None, out=None):
     """Walk the nested taxonomy, collect (node_name, parent_name) pairs."""
     if out is None:
@@ -50,6 +220,7 @@ def flatten_taxonomy(taxonomy, parent=None, out=None):
         # recurse
         flatten_taxonomy(children, node, out)
     return out
+
 
 def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes=False):
     """
@@ -139,6 +310,74 @@ def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes
         coco_files[split] = coco
     return coco_files
 
+
+def expand_excluded_nodes(taxonomy, nodes_to_exclude):
+    """
+    Expand a list of nodes to include all leaf nodes if an internal node is specified.
+    """
+    # Helper to get all leaves under a specific starting dictionary
+    def _collect_leaves(sub_taxonomy):
+        leaves = set()
+        for node, children in sub_taxonomy.items():
+            if not children:
+                leaves.add(node)
+            else:
+                leaves.update(_collect_leaves(children))
+        return leaves
+
+    # Helper to find a node in the taxonomy and return its sub-tree
+    def _find_node_subtree(full_taxonomy, target_node):
+        if target_node in full_taxonomy:
+            return full_taxonomy[target_node]
+        for _, children in full_taxonomy.items():
+            if isinstance(children, dict):
+                found = _find_node_subtree(children, target_node)
+                if found is not None:
+                    return found
+        return None
+
+    expanded_set = set()
+    all_leaf_nodes = _collect_leaves(taxonomy)
+
+    for node_name in nodes_to_exclude:
+        if node_name in all_leaf_nodes:
+            expanded_set.add(node_name)
+        else:
+            # It's potentially an internal node. Find its subtree.
+            subtree = _find_node_subtree(taxonomy, node_name)
+            if subtree is not None:
+                leaves_of_node = _collect_leaves({node_name: subtree})
+                expanded_set.update(leaves_of_node)
+            else:
+                print(f"Warning: Node '{node_name}' not found in taxonomy. It will be treated as a leaf node.")
+                expanded_set.add(node_name)
+
+    return list(expanded_set)
+
+
+def generate_and_save_coco(split_to_images, taxonomy, use_all_nodes,
+                           file_template, out_dir, subtract_one,
+                           categories_to_use=None):
+    """Generates and saves COCO JSON files for the given splits."""
+    coco_files = cvt_to_coco_json(
+        split_to_images,
+        taxonomy,
+        subtract_one=subtract_one,
+        use_all_nodes=use_all_nodes)
+
+    # Overwrite categories for zero-shot evaluation.
+    if categories_to_use:
+        for split in coco_files:
+            coco_files[split]['categories'] = categories_to_use
+
+    for split, coco in coco_files.items():
+        out_file = osp.join(out_dir, file_template.format(split=split))
+        dump(coco, out_file)
+        print(f'Saved {split} COCO file to {out_file}')
+
+    return coco_files
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Convert aircraft CSV annotations to COCO JSON format')
@@ -156,221 +395,83 @@ def main():
         '--subtract-one',
         action='store_true',
         help='Subtract 1 from bounding box coordinates (default: False)')
+    parser.add_argument(
+        '--exclude-nodes-from-train',
+        nargs='*',
+        default=[],
+        help='List of leaf or internal node names to exclude from the training set. '
+             'Images containing these nodes will be removed from the train split.')
     args = parser.parse_args()
 
     # Parse CSV and group annotations by image and split.
     rows = parse_csv(args.csv_file)
     split_to_images = group_annotations_by_image(rows)
-
     mkdir_or_exist(args.out_dir)
 
-    taxonomy_function = {
-        "Military Aircraft": {
-            "Fixed-Wing": {
-                "Combat": {
-                    "Fighters": {
-                        "US Fighters": {
-                            "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}
-                        },
-                        "Russian Fighters": {
-                            "Mig29": {}, "Mig31": {}, "Su57": {}
-                        },
-                        "Western Fighters": {
-                            "JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}
-                        },
-                        "Asian Fighters": {
-                            "J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}
-                        }
-                    },
-                    "Attack Aircraft": {
-                        "A10": {}, "AV8B": {}, "EMB314": {}, "Su25": {}
-                    },
-                    "Bombers": {
-                        "US Bombers": {
-                            "B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}
-                        },
-                        "Russian Bombers": {
-                            "Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}
-                        },
-                        "H6": {},
-                        "Vulcan": {}
-                    },
-                    "Surveillance": {
-                        "Airborne Early Warning": {
-                            "E2": {}, "E7": {}, "KJ600": {}
-                        },
-                        "High Altitude Reconnaissance": {
-                            "SR71": {}, "U2": {}
-                        },
-                        "Maritime Patrol": {
-                            "P3": {}, "WZ7": {}
-                        }
-                    }
-                },
-                "Utility": {
-                    "Cargo Transports": {
-                        "American Cargo": {
-                            "C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}
-                        },
-                        "Russian Cargo": {
-                            "An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}
-                        },
-                        "A400M": {},
-                        "C390": {},
-                        "Y20": {}
-                    },
-                    "Amphibious Aircraft": {
-                        "AG600": {}, "Be200": {}, "CL415": {}, "US2": {}
-                    }
-                },
-                "UAV": {
-                    "Combat and Reconnaissance Drones": {
-                        "MQ9": {}, "RQ4": {}
-                    },
-                    "Tactical UAVs": {
-                        "TB001": {}, "TB2": {}
-                    }
-                },
-            },
-            "Rotorcraft": {
-                "Attack Helicopters": {
-                    "AH64": {}, "Ka52": {}, "Mi24": {}, "Mi28": {}, "Z10": {}
-                },
-                "Utility Helicopters": {
-                    "Land-Based Helicopters": {
-                        "CH47": {}, "Mi8": {}, "Mi26": {}, "UH60": {}
-                    },
-                    "Specialized Helicopters": {
-                        "Ka27": {}, "Z19": {}
-                    }
-                }
-            },
-            "Tiltrotor": {
-                "V22": {}, "V280": {}
-            }
-        }
-    }
+    # Get canonical node order from the functional taxonomy for deterministic filenames.
+    func_taxonomy_nodes_flat = flatten_taxonomy(TAXONOMY_FUNCTION)
+    node_order = {node[0]: i for i, node in enumerate(func_taxonomy_nodes_flat)}
 
-    taxonomy_area = {
-        "Military Aircraft": {
-            "US Aircraft": {
-                "Fixed-Wing": {
-                    "Combat": {
-                        "Fighters": {"F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}},
-                        "Attack Aircraft": {"A10": {}, "AV8B": {}},
-                        "Bombers": {"B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}},
-                        "Surveillance": {
-                            "E2": {},
-                            "High Altitude Reconnaissance": {"SR71": {}, "U2": {}},
-                            "P3": {}
-                        }
-                    },
-                    "Cargo Transports": {"C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}},
-                    "US2": {},
-                    "UAV": {"MQ9": {}, "RQ4": {}}
-                },
-                "Rotorcraft": {
-                    "AH64": {},
-                    "Utility Helicopters": {"CH47": {}, "UH60": {}}
-                },
-                "Tiltrotor": {"V22": {}, "V280": {}}
-            },
-            "Russian Aircraft": {
-                "Fixed-Wing": {
-                    "Combat": {
-                        "Fighters": {"Mig29": {}, "Mig31": {}, "Su57": {}},
-                        "Su25": {},
-                        "Bombers": {"Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}}
-                    },
-                    "Cargo Transports": {"An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}},
-                    "Be200": {}
-                },
-                "Rotorcraft": {
-                    "Attack Helicopters": {"Ka52": {}, "Mi24": {}, "Mi28": {}},
-                    "Utility Helicopters": {"Mi8": {}, "Mi26": {}, "Ka27": {}}
-                }
-            },
-            "European Aircraft": {
-                "Fixed-Wing": {
-                    "Fighters": {"JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}},
-                    "Vulcan": {},
-                    "Utility": {
-                        "A400M": {},
-                        "CL415": {}
-                    },
-                    "TB2": {}
-                }
-            },
-            "Asian Aircraft": {
-                "Fixed-Wing": {
-                    "Combat": {
-                        "Fighters": {"J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}},
-                        "Surveillance": {
-                            "KJ600": {},
-                            "WZ7": {}
-                        }
-                    },
-                    "Utility": {
-                        "Y20": {},
-                        "AG600": {}
-                    },
-                    "TB001": {}
-                },
-                "Rotorcraft": {
-                    "Z10": {},
-                    "Z19": {}
-                }
-            },
-            "Latin American Aircraft": {
-                "Fixed-Wing": {
-                    "EMB314": {},
-                    "C390": {}
-                }
-            }
-        }
-    }
+    # --- Generate and save standard dataset versions ---
+    coco_files_flat = generate_and_save_coco(
+        split_to_images, {}, False, 'aircraft_{split}.json',
+        args.out_dir, args.subtract_one)
 
-    # Generate and save flat version (for function hierarchy eval)
-    coco_files_flat_func = cvt_to_coco_json(
-        split_to_images, {}, subtract_one=args.subtract_one, use_all_nodes=False)
-    for split, coco in coco_files_flat_func.items():
-        out_file = osp.join(args.out_dir, f'aircraft_{split}.json')
-        dump(coco, out_file)
-        print(f'Saved {split} COCO file to {out_file}')
+    coco_files_func = generate_and_save_coco(
+        split_to_images, TAXONOMY_FUNCTION, True, 'aircraft_hierarchy_function_{split}.json',
+        args.out_dir, args.subtract_one)
 
-    # # Generate and save flat version (for function hierarchy eval)
-    # coco_files_flat_func = cvt_to_coco_json(
-    #     split_to_images, taxonomy_function, subtract_one=args.subtract_one, use_all_nodes=False)
-    # for split, coco in coco_files_flat_func.items():
-    #     out_file = osp.join(args.out_dir, f'aircraft_flat_function_{split}.json')
-    #     dump(coco, out_file)
-    #     print(f'Saved {split} COCO file to {out_file}')
+    coco_files_area = generate_and_save_coco(
+        split_to_images, TAXONOMY_AREA, True, 'aircraft_hierarchy_area_{split}.json',
+        args.out_dir, args.subtract_one)
 
-    # # Generate and save flat version (for area hierarchy eval)
-    # coco_files_flat_area = cvt_to_coco_json(
-    #     split_to_images, taxonomy_area, subtract_one=args.subtract_one, use_all_nodes=False)
-    # for split, coco in coco_files_flat_area.items():
-    #     out_file = osp.join(args.out_dir, f'aircraft_flat_area_{split}.json')
-    #     dump(coco, out_file)
-    #     print(f'Saved {split} COCO file to {out_file}')
+    # --- Generate and save versions with excluded training nodes ---
+    if args.exclude_nodes_from_train:
+        print(f"Expanding nodes to exclude from training set: {args.exclude_nodes_from_train}")
+        nodes_to_exclude = expand_excluded_nodes(TAXONOMY_FUNCTION, args.exclude_nodes_from_train)
+        print(f"Final list of excluded leaf nodes: {nodes_to_exclude}")
 
-    # Generate and save hierarchical version (by function)
-    coco_files_hier_func = cvt_to_coco_json(
-        split_to_images, taxonomy_function, subtract_one=args.subtract_one, use_all_nodes=True)
-    for split, coco in coco_files_hier_func.items():
-        out_file = osp.join(args.out_dir,
-                                f'aircraft_hierarchy_function_{split}.json')
-        dump(coco, out_file)
-        print(f'Saved {split} COCO file to {out_file}')
+        nodes_to_exclude_set = set(nodes_to_exclude)
+        train_images = split_to_images.get('train', {})
+        if not train_images:
+            print("No 'train' split found to filter.")
+        else:
+            # Filter training images
+            filtered_train_images = {}
+            for fname, info in train_images.items():
+                if not any(ann['class'] in nodes_to_exclude_set for ann in info['annotations']):
+                    filtered_train_images[fname] = info
 
-    # Generate and save hierarchical version (by area)
-    coco_files_hier_area = cvt_to_coco_json(
-        split_to_images, taxonomy_area, subtract_one=args.subtract_one, use_all_nodes=True)
-    for split, coco in coco_files_hier_area.items():
-        out_file = osp.join(args.out_dir,
-                                f'aircraft_hierarchy_area_{split}.json')
-        dump(coco, out_file)
-        print(f'Saved {split} COCO file to {out_file}')
+            original_count = len(train_images)
+            filtered_count = len(filtered_train_images)
+            print(f"Original training images: {original_count}. "
+                  f"Filtered training images: {filtered_count}. "
+                  f"Removed {original_count - filtered_count} images.")
+
+            filtered_split_to_images = {'train': filtered_train_images}
+            # Sort the excluded nodes based on their order in the taxonomy for a deterministic filename.
+            sorted_excluded_nodes = sorted(
+                args.exclude_nodes_from_train,
+                key=lambda n: node_order.get(n, float('inf')))
+            suffix = '_excluded_' + '.'.join(sorted_excluded_nodes).replace(' ', '-')
+
+            # Get full category lists from the original datasets
+            flat_cats = coco_files_flat.get('train', {}).get('categories')
+            func_cats = coco_files_func.get('train', {}).get('categories')
+            area_cats = coco_files_area.get('train', {}).get('categories')
+
+            # Generate and save the filtered datasets
+            generate_and_save_coco(
+                filtered_split_to_images, {}, False, f'aircraft_{{split}}{suffix}.json',
+                args.out_dir, args.subtract_one, categories_to_use=flat_cats)
+
+            generate_and_save_coco(
+                filtered_split_to_images, TAXONOMY_FUNCTION, True, f'aircraft_hierarchy_function_{{split}}{suffix}.json',
+                args.out_dir, args.subtract_one, categories_to_use=func_cats)
+
+            generate_and_save_coco(
+                filtered_split_to_images, TAXONOMY_AREA, True, f'aircraft_hierarchy_area_{{split}}{suffix}.json',
+                args.out_dir, args.subtract_one, categories_to_use=area_cats)
 
 
 if __name__ == '__main__':
