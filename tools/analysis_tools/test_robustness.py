@@ -143,12 +143,16 @@ def main():
         # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
 
-    # add `DumpResults` dummy metric
-    if args.out is not None:
+    # We will add a DumpResults hook and dynamically update its output path
+    # for each corruption/severity level to save raw prediction files.
+    dump_metric = None
+    if args.out:
         assert args.out.endswith(('.pkl', '.pickle')), \
             'The dump file must be a pkl file.'
-        runner.test_evaluator.metrics.append(
-            DumpResults(out_file_path=args.out))
+        # The out_file_path will be updated inside the loop.
+        # A placeholder is used here.
+        dump_metric = DumpResults(out_file_path='placeholder.pkl')
+        runner.test_evaluator.metrics.append(dump_metric)
 
     if 'all' in args.corruptions:
         corruptions = [
@@ -195,6 +199,16 @@ def main():
                     aggregated_results[corruptions[0]][0]
                 continue
 
+            # If args.out is provided, update the path for the DumpResults hook
+            # to save the raw predictions for the current run.
+            if args.out and dump_metric:
+                # Create a directory named after the output file (without extension)
+                raw_preds_dir = osp.splitext(args.out)[0]
+                os.makedirs(raw_preds_dir, exist_ok=True)
+                dump_metric.out_file_path = osp.join(
+                    raw_preds_dir,
+                    f'{corruption}_sev{corruption_severity}.pkl')
+
             test_loader_cfg = copy.deepcopy(cfg.test_dataloader)
             # assign corruption and severity
             if corruption_severity > 0:
@@ -217,6 +231,7 @@ def main():
             print(f'\nTesting {corruption} at severity {corruption_severity}')
 
             eval_results = runner.test()
+
             if args.out:
                 eval_results_filename = (
                     osp.splitext(args.out)[0] + '_results' +
