@@ -222,7 +222,7 @@ def flatten_taxonomy(taxonomy, parent=None, out=None):
     return out
 
 
-def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes=False):
+def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes=False, label_ids_to_use=None):
     """
     Convert grouped annotations into COCO format.
     If subtract_one is True, subtract 1 from bounding box coordinates.
@@ -232,14 +232,18 @@ def cvt_to_coco_json(split_to_images, taxonomy, subtract_one=True, use_all_nodes
     supers = {n: p for n, p in flat}
 
     # Create a canonical category mapping.
-    # Start with leaf nodes from the data, sorted alphabetically.
-    categories_set = set()
-    for images in split_to_images.values():
-        for info in images.values():
-            for ann in info['annotations']:
-                categories_set.add(ann['class'])
-    categories_list = sorted(list(categories_set))
-    label_ids = {cat: idx for idx, cat in enumerate(categories_list)}
+    if label_ids_to_use:
+        label_ids = label_ids_to_use
+        categories_list = sorted(label_ids.keys(), key=lambda k: label_ids[k])
+    else:
+        # Start with leaf nodes from the data, sorted alphabetically.
+        categories_set = set()
+        for images in split_to_images.values():
+            for info in images.values():
+                for ann in info['annotations']:
+                    categories_set.add(ann['class'])
+        categories_list = sorted(list(categories_set))
+        label_ids = {cat: idx for idx, cat in enumerate(categories_list)}
 
     # If using all nodes, append parent/intermediate nodes from the taxonomy
     # that are not already present. This ensures leaf nodes always have the
@@ -357,13 +361,14 @@ def expand_excluded_nodes(taxonomy, nodes_to_exclude):
 
 def generate_and_save_coco(split_to_images, taxonomy, use_all_nodes,
                            file_template, out_dir, subtract_one,
-                           categories_to_use=None):
+                           categories_to_use=None, label_ids_to_use=None):
     """Generates and saves COCO JSON files for the given splits."""
     coco_files = cvt_to_coco_json(
         split_to_images,
         taxonomy,
         subtract_one=subtract_one,
-        use_all_nodes=use_all_nodes)
+        use_all_nodes=use_all_nodes,
+        label_ids_to_use=label_ids_to_use)
 
     # Overwrite categories for zero-shot evaluation.
     if categories_to_use:
@@ -463,15 +468,18 @@ def main():
             # Generate and save the filtered datasets
             generate_and_save_coco(
                 filtered_split_to_images, {}, False, f'aircraft_{{split}}{suffix}.json',
-                args.out_dir, args.subtract_one, categories_to_use=flat_cats)
+                args.out_dir, args.subtract_one, categories_to_use=flat_cats,
+                label_ids_to_use={cat['name']: cat['id'] for cat in flat_cats})
 
             generate_and_save_coco(
                 filtered_split_to_images, TAXONOMY_FUNCTION, True, f'aircraft_hierarchy_function_{{split}}{suffix}.json',
-                args.out_dir, args.subtract_one, categories_to_use=func_cats)
+                args.out_dir, args.subtract_one, categories_to_use=func_cats,
+                label_ids_to_use={cat['name']: cat['id'] for cat in func_cats})
 
             generate_and_save_coco(
                 filtered_split_to_images, TAXONOMY_AREA, True, f'aircraft_hierarchy_area_{{split}}{suffix}.json',
-                args.out_dir, args.subtract_one, categories_to_use=area_cats)
+                args.out_dir, args.subtract_one, categories_to_use=area_cats,
+                label_ids_to_use={cat['name']: cat['id'] for cat in area_cats})
 
 
 if __name__ == '__main__':
