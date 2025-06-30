@@ -1,0 +1,13 @@
+_base_ = [
+    '../../_base_/embedding-dino-4scale_r50_improved.py',
+    '../../datasets/aircraft_flat_function_excluded_F16.Mig29.B1.C130.TB2.AH64.py',
+    '../../schedules/schedule_r50_improved_8xb2-36e.py'
+]
+
+custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], allow_failed_imports=False)
+
+model = dict(
+    bbox_head=dict(
+        num_classes=81,
+    )
+)
