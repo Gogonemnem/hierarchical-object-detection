@@ -94,6 +94,10 @@ def parse_args():
         'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Print the detailed hierarchical distribution table to the console.')
     args = parser.parse_args()
     return args
 
@@ -152,48 +156,68 @@ def analyze_per_img_dets(confusion_matrix,
             have done nms in the detector, only applied when users want to
             change the nms IoU threshold. Default: None.
     """
-    # Efficiently extract GT data using list comprehensions
-    gt_bboxes = np.array([gt['bbox'] for gt in gts])
-    gt_labels = np.array([gt['bbox_label'] for gt in gts])
-    true_positives = np.zeros(len(gts))
+    # 1. Extract and prepare GT and detection data
+    gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
+    gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
+    gt_matched = np.zeros(len(gts), dtype=bool)
 
-    # Get unique detection labels for efficient processing
-    unique_labels = np.unique(result['labels'].numpy())
+    det_scores = result['scores'].numpy()
+    score_mask = det_scores >= score_thr
+    det_bboxes = result['bboxes'].numpy()[score_mask]
+    det_labels = result['labels'].numpy()[score_mask]
+    det_scores = det_scores[score_mask]
 
-    for det_label in unique_labels:
-        mask = (result['labels'] == det_label)
-        det_bboxes = result['bboxes'][mask].numpy()
-        det_scores = result['scores'][mask].numpy()
+    # Optional NMS. Note: The original implementation had a bug here.
+    # This is a more robust way to handle it.
+    if nms_iou_thr and len(det_bboxes) > 0:
+        det_bboxes_with_scores = np.hstack([det_bboxes, det_scores[:, np.newaxis]])
+        keep, _ = nms(det_bboxes_with_scores, nms_iou_thr)
+        det_bboxes = det_bboxes[keep]
+        det_labels = det_labels[keep]
+        det_scores = det_scores[keep]
 
-        # Apply NMS if threshold specified
-        if nms_iou_thr:
-            det_bboxes, _ = nms(det_bboxes, det_scores, nms_iou_thr, score_threshold=score_thr)
-        
-        # Calculate IoU overlaps once per detection label
-        if len(det_bboxes) > 0 and len(gt_bboxes) > 0:
-            ious = bbox_overlaps(det_bboxes[:, :4], gt_bboxes)
+    # 2. Sort detections by score for greedy matching
+    sort_inds = np.argsort(-det_scores)
+
+    # 3. Perform greedy matching
+    if len(gts) > 0 and len(det_bboxes) > 0:
+        # Pre-calculate all IoUs between filtered detections and GTs
+        ious = bbox_overlaps(det_bboxes[sort_inds, :4], gt_bboxes)
+
+        for i in range(len(sort_inds)):
+            det_label = det_labels[sort_inds[i]]
+            iou_row = ious[i, :]
             
-            # Process detections with vectorized operations where possible
-            for i, score in enumerate(det_scores):
-                if score >= score_thr:
-                    # Find matches above IoU threshold
-                    matches = ious[i] >= tp_iou_thr
-                    if matches.any():
-                        matched_gt_indices = np.where(matches)[0]
-                        for j in matched_gt_indices:
-                            if gt_labels[j] == det_label:
-                                true_positives[j] += 1  # TP
-                            confusion_matrix[gt_labels[j], det_label] += 1
-                    else:
-                        confusion_matrix[-1, det_label] += 1  # BG FP
+            best_gt_idx = -1
+            max_iou = -1
 
-    # Mark false negatives efficiently
-    fn_mask = true_positives == 0
-    for gt_label in gt_labels[fn_mask]:
-        confusion_matrix[gt_label, -1] += 1
+            # Find the best available (unmatched) GT for this detection
+            for j in range(len(gts)):
+                if not gt_matched[j] and iou_row[j] > max_iou:
+                    max_iou = iou_row[j]
+                    best_gt_idx = j
+            
+            if max_iou >= tp_iou_thr:
+                # Match found: claim the GT and update confusion matrix
+                gt_matched[best_gt_idx] = True
+                gt_label_of_match = gt_labels[best_gt_idx]
+                confusion_matrix[gt_label_of_match, det_label] += 1
+            else:
+                # No suitable GT match: this is a background FP
+                confusion_matrix[-1, det_label] += 1
+    
+    # Handle case where there are detections but no GTs (all FPs)
+    elif len(gts) == 0 and len(det_bboxes) > 0:
+        for i in range(len(det_bboxes)):
+            confusion_matrix[-1, det_labels[i]] += 1
+
+    # 4. Account for any unmatched GTs as False Negatives
+    for j in range(len(gts)):
+        if not gt_matched[j]:
+            confusion_matrix[gt_labels[j], -1] += 1
 
 
-def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix):
+def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, verbose=False):
     """Calculate the hierarchical prediction distribution including siblings and cousins.
 
     Args:
@@ -270,27 +294,60 @@ def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix):
             total_stats[key] += value
     
     total_stats.update(get_additional_stats(total_stats))
-    print_hierarchical_prediction_distribution(stats)
+    if verbose:
+        print_hierarchical_prediction_distribution(stats)
     return stats
 
 
 def get_additional_stats(stats):
-    """Calculate additional derived statistics efficiently."""
-    total_gt = stats['total_gt']
-    
-    # Calculate percentages efficiently with batch processing
-    percentage_keys = ['parent_tp', 'grandparent_tp', 'sibling_tp', 'cousin_tp', 'ancestor_tp']
-    percentages = {f"{key.replace('_tp', '')}_percentage": 
-                   (stats[key] / total_gt * 100) if total_gt > 0 else 0 
-                   for key in percentage_keys}
-    
-    # Calculate remaining derived stats
-    total_tp = sum(stats[key] for key in ['tp'] + percentage_keys)
-    
+    """Calculate additional derived statistics and percentages."""
+    total_gt = stats.get('total_gt', 0)
+
+    # Calculate 'other_class' count first. These are predictions that are not
+    # the correct class, a hierarchical relative, or a false negative (miss).
+    hierarchical_tp_keys = [
+        'tp', 'parent_tp', 'grandparent_tp', 'sibling_tp', 'cousin_tp',
+        'ancestor_tp'
+    ]
+    total_hierarchical_tp = sum(stats.get(key, 0)
+                                for key in hierarchical_tp_keys)
+    other_class_count = total_gt - total_hierarchical_tp - stats.get('fn', 0)
+    other_class_count = max(0, other_class_count)
+
+    # Calculate all percentages relative to the total ground truth count.
+    percentages = {}
+    if total_gt > 0:
+        keys_to_convert = {
+            'tp': 'tp_percentage', 'parent_tp': 'parent_percentage',
+            'grandparent_tp': 'grandparent_percentage',
+            'sibling_tp': 'sibling_percentage', 'cousin_tp': 'cousin_percentage',
+            'ancestor_tp': 'ancestor_percentage', 'fn': 'fn_percentage'
+        }
+        for old_key, new_key in keys_to_convert.items():
+            percentages[new_key] = (stats.get(old_key, 0) / total_gt) * 100
+        percentages['other_class_percentage'] = (other_class_count / total_gt) * 100
+    else:
+        # If no ground truth, all percentages are 0.
+        all_percentage_keys = [
+            'tp_percentage', 'parent_percentage', 'grandparent_percentage',
+            'sibling_percentage', 'cousin_percentage', 'ancestor_percentage',
+            'fn_percentage', 'other_class_percentage'
+        ]
+        for key in all_percentage_keys:
+            percentages[key] = 0
+
+    # The 'distance' metric is a weighted sum of ancestor predictions.
+    # avg_distance should be normalized by the total number of ancestor predictions.
+    total_ancestor_predictions = (
+        stats.get('parent_tp', 0) + stats.get('grandparent_tp', 0) +
+        stats.get('ancestor_tp', 0))
+    avg_distance = (stats.get('distance', 0) / total_ancestor_predictions
+                    if total_ancestor_predictions > 0 else 0)
+
     return {
         **percentages,
-        'avg_distance': stats['distance'] / total_tp if total_tp > 0 else 0,
-        'other_class': total_gt - total_tp - stats['fn']
+        'avg_distance': avg_distance,
+        'other_class': other_class_count
     }
 
 def print_hierarchical_prediction_distribution(stats):
@@ -954,7 +1011,7 @@ def main():
                                                   args.nms_iou_thr,
                                                   args.tp_iou_thr)
     
-    stats = calculate_hierarchical_prediction_distribution(dataset, confusion_matrix)
+    stats = calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, args.verbose)
 
     plot_stacked_percentage_bar_chart(
         stats, 
