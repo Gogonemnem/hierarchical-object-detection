@@ -64,6 +64,11 @@ def parse_args():
         default=True,
         help='disable hierarchical family labels above the bars (default: enabled)')
     parser.add_argument(
+        '--no-fp-overlay',
+        dest='show_fp_overlay',
+        action='store_false',
+        help='disable the false positive count overlay on the plot')
+    parser.add_argument(
         '--show-sample-overlay',
         action='store_true',
         help='overlay sample size information on the plot')
@@ -171,7 +176,7 @@ def analyze_per_img_dets(confusion_matrix,
     # This is a more robust way to handle it.
     if nms_iou_thr and len(det_bboxes) > 0:
         det_bboxes_with_scores = np.hstack([det_bboxes, det_scores[:, np.newaxis]])
-        keep, _ = nms(det_bboxes_with_scores, nms_iou_thr)
+        keep = nms(det_bboxes, det_scores, nms_iou_thr)
         det_bboxes = det_bboxes[keep]
         det_labels = det_labels[keep]
         det_scores = det_scores[keep]
@@ -234,7 +239,7 @@ def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, ve
     
     # Initialize totals with all required fields
     total_stats = stats['Total'] = {key: 0 for key in ['total_gt', 'tp', 'parent_tp', 'grandparent_tp', 
-                                                       'sibling_tp', 'cousin_tp', 'ancestor_tp', 'distance', 'fn']}
+                                                       'sibling_tp', 'cousin_tp', 'ancestor_tp', 'distance', 'fn', 'fp_bg']}
     
     # Helper function for getting valid indices from class names
     def get_valid_indices(class_names):
@@ -254,7 +259,8 @@ def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, ve
         basic_values = {
             'total_gt': gts.sum(),
             'fn': gts[-1], 
-            'tp': gts[idx]
+            'tp': gts[idx],
+            'fp_bg': confusion_matrix[-1, idx]
         }
         
         # Hierarchical relationship predictions
@@ -357,7 +363,7 @@ def print_hierarchical_prediction_distribution(stats):
         stats (dict): The hierarchical prediction distribution statistics.
     """
     print("\nHierarchical Prediction Distribution Analysis (Leaf Nodes):")
-    header = (f"{'GT Leaf Class':<15} | {'Total GT':>8} | {'TP':>6} | {'Parent':>8} | {'G.Parent':>9} | {'Sibling':>8} | "
+    header = (f"{'GT Leaf Class':<15} | {'Total GT':>8} | {'TP':>6} | {'FP (BG)':>8} | {'Parent':>8} | {'G.Parent':>9} | {'Sibling':>8} | "
               f"{'Cousin':>8} | {'Ancestor':>8} | {'%Parent':>8} | {'%G.Parent':>10} | {'%Sibling':>9} | {'%Cousin':>8} | "
               f"{'%Ancestor':>9} | {'FN':>6}")
     print(header)
@@ -379,7 +385,7 @@ def print_single_class_stats(node_name, stats):
         node_name (str): The name of the node/class.
         stats (dict): The statistics for a single class.
     """
-    print(f"{node_name:<15} | {stats['total_gt']:>8} | {stats['tp']:>6} | {stats['parent_tp']:>8} | "
+    print(f"{node_name:<15} | {stats['total_gt']:>8} | {stats['tp']:>6} | {stats.get('fp_bg', 0):>8} | {stats['parent_tp']:>8} | "
           f"{stats['grandparent_tp']:>9} | {stats['sibling_tp']:>8} | {stats['cousin_tp']:>8} | {stats['ancestor_tp']:>8} | "
           f"{stats['parent_percentage']:>7.1f}% | {stats['grandparent_percentage']:>9.1f}% | {stats['sibling_percentage']:>8.1f}% | "
           f"{stats['cousin_percentage']:>7.1f}% | {stats['ancestor_percentage']:>8.1f}% | {stats['fn']:>6}")
@@ -669,7 +675,7 @@ def _organize_classes_by_hierarchy(stats, dataset, max_hierarchy_levels=None):
 
 
 def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='', dataset=None, 
-                                     show_hierarchy_labels=True, show_sample_overlay=False, use_log_scale=False, max_hierarchy_levels=None, aggregate_at_level=None):
+                                     show_hierarchy_labels=True, show_fp_overlay=True, show_sample_overlay=False, use_log_scale=False, max_hierarchy_levels=None, aggregate_at_level=None):
     """
     Plots a stacked percentage bar chart for hierarchical prediction distribution with improved organization.
     
@@ -680,6 +686,7 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
         title_suffix: Additional text for plot title
         dataset: Dataset object with taxonomy information
         show_hierarchy_labels: Whether to show hierarchy labels above bars
+        show_fp_overlay: Whether to show false positive count overlay
         show_sample_overlay: Whether to show sample size overlay
         use_log_scale: Whether to use log scale for sample overlay
         max_hierarchy_levels: Maximum number of hierarchy levels to show (None = show all)
@@ -710,10 +717,11 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
             print(f"Warning: Requested aggregation level {aggregate_at_level} exceeds maximum hierarchy depth {max_depth-1}. Showing all individual leaf classes.")
     
     # Extract data arrays efficiently using list comprehension with zip
-    data_keys = ['total_gt', 'tp', 'parent_tp', 'grandparent_tp', 'sibling_tp', 'cousin_tp', 'ancestor_tp', 'fn', 'other_class']
+    data_keys = ['total_gt', 'tp', 'parent_tp', 'grandparent_tp', 'sibling_tp', 'cousin_tp', 'ancestor_tp', 'fn', 'other_class', 'fp_bg']
     data_arrays = {}
     for key in data_keys:
-        data_arrays[key] = np.array([stats[name][key] for name in leaf_names])
+        # Ensure fp_bg is handled correctly if missing from some stats
+        data_arrays[key] = np.array([stats[name].get(key, 0) for name in leaf_names])
     
     # Calculate percentages efficiently using vectorized operations
     total_gts = data_arrays['total_gt']
@@ -817,6 +825,7 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
     ax.set_ylim(0, max_y_position)
     ax.grid(axis='y', linestyle='--', alpha=0.7)
     
+    ax2 = None # Initialize ax2 to None
     # Create sample size overlay if requested
     if show_sample_overlay:
         ax2 = ax.twinx()
@@ -846,6 +855,32 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
             ax2.tick_params(axis='y', labelcolor='steelblue', labelsize=8)
             ax2.spines['right'].set_color('steelblue')
             ax2.spines['right'].set_alpha(0.7)
+
+    # Create FP overlay if requested
+    if show_fp_overlay:
+        if ax2 is None:
+            ax2 = ax.twinx()
+
+        fp_bg_counts = data_arrays['fp_bg']
+        total_fp = stats.get('Total', {}).get('fp_bg', 0)
+        fp_label = f'FP (BG) Count (Total: {total_fp})'
+        fp_data = [(i, fp_bg_counts[i]) for i, name in enumerate(leaf_names) if name != 'Total']
+
+        if fp_data:
+            x_positions_fp, fp_counts = zip(*fp_data)
+            
+            # Plot FP overlay
+            _ = ax2.plot(x_positions_fp, fp_counts, 
+                        color='darkred', marker='x', markersize=4, 
+                        linewidth=1.2, alpha=0.7, linestyle=':',
+                        label=fp_label)
+            
+            # Style secondary axis for FPs
+            if not show_sample_overlay: # Only set label if not already set
+                ax2.set_ylabel('Count', fontsize=9, color='gray')
+            ax2.tick_params(axis='y', labelcolor='darkred' if not show_sample_overlay else 'gray', labelsize=8)
+            ax2.spines['right'].set_color('darkred' if not show_sample_overlay else 'gray')
+            ax2.spines['right'].set_alpha(0.7)
     
     # Format x-axis labels
     _format_x_axis_labels(ax, leaf_names, hierarchy_info, stats, show_sample_overlay)
@@ -858,9 +893,24 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
     reversed_labels = list(reversed(main_labels))
     
     # Add sample overlay to legend if present
-    if show_sample_overlay and len(handles) > 8:
-        reversed_handles.append(handles[-1])
-        reversed_labels.append(labels[-1])
+    if show_sample_overlay and ax2:
+        handles_ax2, labels_ax2 = ax2.get_legend_handles_labels()
+        # Find the sample overlay handle/label specifically
+        for handle, label in zip(handles_ax2, labels_ax2):
+            if 'Sample' in label:
+                reversed_handles.append(handle)
+                reversed_labels.append(label)
+                break # Assume only one sample overlay line
+
+    # Add FP overlay to legend if present
+    if show_fp_overlay and ax2:
+        handles_ax2, labels_ax2 = ax2.get_legend_handles_labels()
+        # Find the FP overlay handle/label specifically
+        for handle, label in zip(handles_ax2, labels_ax2):
+            if 'FP (BG)' in label:
+                reversed_handles.append(handle)
+                reversed_labels.append(label)
+                break # Assume only one FP overlay line
 
     # Place main legend with adaptive sizing
     legend_fontsize = 10 if is_aggregated else 9
@@ -1019,6 +1069,7 @@ def main():
         args.show, 
         dataset=dataset,
         show_hierarchy_labels=args.show_hierarchy_labels,
+        show_fp_overlay=args.show_fp_overlay,
         show_sample_overlay=args.show_sample_overlay,
         use_log_scale=args.use_log_scale,
         max_hierarchy_levels=args.max_hierarchy_levels,
