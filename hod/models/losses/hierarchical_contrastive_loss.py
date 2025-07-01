@@ -26,11 +26,14 @@ class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
             self.hierarchical_mask = ancestor_mask.unsqueeze(0) # Shape: (1, C_i, C_j)
             self.class_level_weight = torch.ones(1, device=self.class_level_weight.device)
 
-        elif self.aggregate_per == 'node' or self.aggregate_per == 'depth':
+        elif self.aggregate_per in ['node', 'depth']:
             expanded_for_i = ancestor_mask.T.unsqueeze(2) # Shape: (C_k, C_i, 1)
             expanded_for_j = ancestor_mask.T.unsqueeze(1) # Shape: (C_k, 1, C_j)
             # self.hierarchical_mask[k, i, j] is True if (k is ancestor of i) AND (k is ancestor of j)
             self.hierarchical_mask = expanded_for_i & expanded_for_j # Shape: (C_k, C_i, C_j)
+
+        if self.aggregate_per == 'node':
+            self.class_level_weight = self.class_level_weight / self.class_level_weight.sum()
 
         if self.aggregate_per == 'depth':
             depth_lca = self.hierarchical_mask.sum(dim=0, keepdim=True) # Shape: (1, C_i, C_j)
