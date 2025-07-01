@@ -1,38 +1,28 @@
 import torch
 
-from mmengine.fileio import load
 from mmdet.registry import MODELS
 from mmdet.models.losses.focal_loss import FocalLoss, py_sigmoid_focal_loss
 
-from hod.utils.tree import HierarchyTree
+from hod.models.losses.hierarchical_loss import HierarchicalDataMixin
 
 @MODELS.register_module()
-class HierarchicalFocalLoss(FocalLoss):
+class HierarchicalFocalLoss(FocalLoss, HierarchicalDataMixin):
     def __init__(self,
-                 ann_file='',
+                 ann_file,
                  decay=1,
                  **kwargs):
         """
         kwargs are forwarded to FocalLoss,
         e.g. `num_classes=len(class_to_idx)`, `ignore_index=...`, etc.
         """
-        super().__init__(**kwargs)
-        # we'll keep a little cache of each parent-child index list
+        FocalLoss.__init__(self, **kwargs)
+        HierarchicalDataMixin.__init__(self, ann_file=ann_file)
         self.decay = decay
-        self.load_taxonomy(ann_file)
+        self.post_process_taxonomy()
 
-    def load_taxonomy(self, ann_file):
-        ann = load(ann_file)
-        cats = ann['categories']
-        # build name<->idx map
-        self.class_to_idx = {c['name']: c['id'] for c in cats}
-
-        # build the tree
-        taxonomy = ann.get('taxonomy', {})
-        self.tree = HierarchyTree(taxonomy)
-
+    def post_process_taxonomy(self):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        C = len(cats)
+        C = len(self.class_to_idx)
         self.ancestor_path_target_mask = torch.zeros(
             (C+1, C),
             dtype=torch.bool,

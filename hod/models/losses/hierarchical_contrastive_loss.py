@@ -6,13 +6,14 @@ from hod.models.losses.hierarchical_focal_loss import HierarchicalFocalLoss
 @MODELS.register_module()
 class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
     def __init__(self,
+                 ann_file,
                  aggregate_per='depth',
                  **kwargs):
         self.aggregate_per = aggregate_per
-        super().__init__(**kwargs)
+        super().__init__(ann_file=ann_file, **kwargs)
 
-    def load_taxonomy(self, ann_file):
-        super().load_taxonomy(ann_file)
+    def post_process_taxonomy(self):
+        super().post_process_taxonomy()
         leafs = self.tree.get_leaf_nodes()
         leaf_idx = [self.class_to_idx[leaf.name] for leaf in leafs]
         self.leaf_idx = torch.tensor(leaf_idx, device=self.class_level_weight.device)
