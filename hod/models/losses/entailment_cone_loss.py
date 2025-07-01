@@ -76,48 +76,47 @@ class EntailmentConeLoss(nn.Module, HierarchicalDataMixin):
         self.register_buffer("_pos_mask", pos_mask, persistent=False)
         self.register_buffer("_neg_mask", neg_mask, persistent=False)
 
-    def forward(self, prototypes: torch.Tensor) -> torch.Tensor:
-        parent = prototypes[:, None]  # [N, 1, d]
-        child = prototypes[None, :]   # [1, N, d]
-        
-        # Norms & Derivatives
-        proto_norm = prototypes.norm(dim=-1)
-        parent_norm = proto_norm[:, None]  # [N, 1]
-        child_norm = proto_norm[None, :]   # [1, N]
-        parent_norm_sq = parent_norm**2
-        child_norm_sq = child_norm**2
+    def forward(self, prototypes: torch.Tensor, eps=1e-6) -> torch.Tensor:\
+        # check if there are any positive pairs to compute loss on
+        if not self._pos_mask.any():
+            return prototypes.new_tensor(0.0)
 
-        eps = 1e-6  # numerical stability
+        # parent = prototypes[:, None]  # [N, 1, d]
+        # child = prototypes[None, :]   # [1, N, d]
+
+        # Norms
+        proto_norm = prototypes.norm(dim=-1)
+        proto_norm_sq = proto_norm**2
 
         # ---------- aperture Ψ(p) -------------------------------------------
         ap = self.beta / (proto_norm + eps)
         if self.curvature == -1.0:  # Poincaré factor
             ap = ap * (1 - proto_norm**2)
-        aperture = torch.asin(torch.clamp(ap, 0.0, 1.0 - eps))
-        
+        # Aperture is a property of the parent cone (row index), so we shape
+        # it to [N, 1] for correct broadcasting against the [N, N] angle matrix.
+        aperture = torch.asin(torch.clamp(ap, 0.0, 1.0 - eps))[:, None]
 
         # ---------- apex angle ----------------------------------------------
-        diff = parent - child
-        diff_norm = torch.norm(diff, dim=-1)
+        dot = prototypes @ prototypes.T
+        diff_norm_sq = proto_norm_sq[:, None] + proto_norm_sq[None, :] - 2 * dot
+        diff_norm = torch.sqrt(torch.relu(diff_norm_sq) + eps)
 
         if self.curvature == 0.0:  # ─ Euclidean ─
             num = (
-                child_norm_sq - parent_norm_sq
+                proto_norm_sq[None, :] - proto_norm_sq[:, None]
                 - torch.square(diff_norm)
             )
-            denom = 2 * parent_norm_sq * diff_norm
+            denom = 2 * proto_norm[:, None] * diff_norm
 
         elif self.curvature == -1.0:  # ─ Poincaré ─
-            dot = (parent * child).sum(dim=-1)
-            num = dot * (1 + parent_norm_sq) - parent_norm_sq * (1 + child_norm_sq)
+            num = dot * (1 + proto_norm_sq[:, None]) - proto_norm_sq[:, None] * (1 + proto_norm_sq[None, :])
 
-            omega = parent_norm * diff_norm
-            den_sq = 1 + parent_norm_sq * child_norm_sq - 2 * dot
+            omega = proto_norm[:, None] * diff_norm
+            den_sq = 1 + proto_norm_sq[:, None] * proto_norm_sq[None, :] - 2 * dot
             denom = omega * torch.sqrt(torch.clamp(den_sq, min=0.0))
         else:
             raise NotImplementedError("curvature must be 0 or -1")
 
-        
         cosang = torch.clamp(num / (denom + eps), -1 + eps, 1 - eps)
         angle = torch.acos(cosang)
 
