@@ -1,11 +1,12 @@
-from collections import defaultdict
+import time
 import copy
 import datetime
-import time
+from collections import defaultdict
 from typing import Dict
 
 import numpy as np
 from pycocotools import mask as maskUtils
+from tqdm import tqdm
 
 from mmdet.datasets.api_wrappers import COCOeval
 
@@ -23,7 +24,15 @@ class HierarchicalCOCOeval(COCOeval):
         self.hierarchy_tree = HierarchyTree(hierarchy_tree)
         self.label_to_name = {cat['id']: cat['name'] for cat in self.cocoGt.dataset['categories']}
         self.params.useCats = 0
-    
+        self._precompute_paths()
+
+    def _precompute_paths(self):
+        """Precomputes all paths in the hierarchy and stores them in a lookup table."""
+        self.path_lookup = {}
+        for name in self.hierarchy_tree.class_to_node.keys():
+            # Store path as a set for fast intersection
+            self.path_lookup[name] = set(self.hierarchy_tree.get_path(name))
+
     def _prepare(self):
         '''
         Prepare ._gts and ._dts for evaluation based on params
@@ -87,10 +96,14 @@ class HierarchicalCOCOeval(COCOeval):
 
         evaluateImg = self.evaluateImg
         maxDet = p.maxDets[-1]
+
+        # Create a list of all evaluation tasks
+        tasks = [(imgId, areaRng) for areaRng in p.areaRng for imgId in p.imgIds]
+
+        # Use tqdm for a progress bar
         self.evalImgs = [evaluateImg(imgId, areaRng, maxDet)
-                 for areaRng in p.areaRng
-                 for imgId in p.imgIds
-             ]
+                         for imgId, areaRng in tqdm(tasks, desc='Running per-image evaluation')]
+
         self._paramsEval = copy.deepcopy(self.params)
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format(toc-tic))
@@ -189,7 +202,8 @@ class HierarchicalCOCOeval(COCOeval):
         dt = [dt[i] for i in dtind[0:maxDet]]
         iscrowd = [int(o['iscrowd']) for o in gt]
         # load computed ious
-        ious = self.ious[imgId][:, gtind] if len(self.ious[imgId]) > 0 else self.ious[imgId]
+        ious = self.ious[imgId][dtind, :] if len(self.ious[imgId]) > 0 else self.ious[imgId]
+        ious = ious[:, gtind]
 
         T = len(p.iouThrs)
         G = len(gt)
@@ -197,63 +211,155 @@ class HierarchicalCOCOeval(COCOeval):
         gtm  = np.zeros((T,G))
         dtm  = np.zeros((T,D))
         gtIg = np.array([g['_ignore'] for g in gt])
-        dtIg = np.zeros((T,D))
+        dtIg = np.zeros((T,D), dtype=bool)
+        # For "stealing", we need to track which detection index is matched to a GT
+        gtm_idx = -np.ones((T, G), dtype=int)
+        # We also need to store the hf1 and overlap of the current best match for each GT
+        gt_hf1 = np.zeros((T, G))
+
         hierarchical_stats = {
             'overlaps': np.zeros((T, D)),
             'len_dt': np.zeros((D)),
             'len_gt': np.zeros((G)),
         }
+        # Precompute all path lengths
+        for dind, d in enumerate(dt):
+            dt_label = self.label_to_name.get(d['category_id'])
+            if dt_label:
+                hierarchical_stats['len_dt'][dind] = len(self.path_lookup.get(dt_label, []))
+        for gind, g in enumerate(gt):
+            gt_label = self.label_to_name.get(g['category_id'])
+            if gt_label:
+                hierarchical_stats['len_gt'][gind] = len(self.path_lookup.get(gt_label, []))
+
+
         if not len(ious)==0:
             for tind, t in enumerate(p.iouThrs):
-                # flip loop order as multiple dts can match a single gt with hierarchical reasoning
-                for gind, g in enumerate(gt):
-                    # skip crowds just like COCOeval
-                    if iscrowd[gind]:
+                # --- Non-Greedy Matching using Iterative Refinement ---
+                
+                # Keep track of which detections are currently matched
+                d_matched = np.zeros(D, dtype=bool)
+                
+                # Use a list to manage detections that need to be matched or re-matched.
+                # Initially, this is all detections, in confidence order.
+                detections_to_process = list(range(D))
+
+                # Safeguard against infinite loops
+                loop_count = 0
+                max_loops = D * D + 1 # Should be more than enough
+
+                while detections_to_process:
+                    if loop_count > max_loops:
+                        print(f"WARNING: Breaking out of matching loop for img {imgId}, iouThr {t}. Exceeded max iterations.")
+                        break
+                    loop_count += 1
+
+                    dind = detections_to_process.pop(0) # Get the next highest-confidence detection
+                    d = dt[dind]
+
+                    best_boost = 1e-9  # Use a small epsilon to ensure only real improvements cause a steal
+                    best_gt_match_idx = -1
+                    best_match_metrics = {}
+                    best_iou = -1.0
+                    
+                    # For ancestor-ignoring: track best hf1 if no positive boost is found
+                    best_unmatched_hf1 = -1.0
+                    best_unmatched_gt_idx = -1
+
+                    curr_d_label = self.label_to_name.get(d['category_id'])
+                    if not curr_d_label:
                         continue
-                    # information about best match so far (m=-1 -> unmatched)
-                    hf1 = 0
-                    iou = min([t,1-1e-10])
-                    m   = -1 # best detection match index
-                    len_overlap = 0
-                    for dind, d in enumerate(dt):
-                        # if this dt already matched, and not a crowd, continue
-                        if dtm[tind, dind]>0:
+
+                    # Find the best possible GT match for the current detection
+                    for gind, g in enumerate(gt):
+                        # A GT is a potential candidate if IoU is sufficient
+                        if ious[dind, gind] < t:
                             continue
 
-                        metrics = hierarchical_prf_metric(
-                            self.hierarchy_tree, d['category_id'], g['category_id'],
-                            self.label_to_name, return_paths=True
+                        gt_label = self.label_to_name.get(g['category_id'])
+                        if not gt_label:
+                            continue
+                        
+                        potential_match_metrics = hierarchical_prf_metric(
+                            self.path_lookup, curr_d_label, gt_label, return_paths=True
                         )
-                        hierarchical_stats['len_dt'][dind] = metrics['len_dt']
-                        hierarchical_stats['len_gt'][gind] = metrics['len_gt']
+                        potential_hf1 = potential_match_metrics['hf1']
+                        
+                        # The "boost" is the improvement over the GT's current match (if any)
+                        existing_hf1 = gt_hf1[tind, gind]
+                        boost = potential_hf1 - existing_hf1
 
-                        # looping over gt first, only leftover dts, no no need to check
-                        # # if dt matched to reg gt, and on ignore gt, stop
-                        # if m>-1 and gtIg[m]==0 and gtIg[gind]==1:
-                        #     break
+                        if boost > best_boost:
+                            best_boost = boost
+                            best_gt_match_idx = gind
+                            best_match_metrics = potential_match_metrics
+                            best_iou = ious[dind, gind]
+                        elif boost == best_boost and ious[dind, gind] > best_iou:
+                            # Tie-break with IoU
+                            best_gt_match_idx = gind
+                            best_match_metrics = potential_match_metrics
+                            best_iou = ious[dind, gind]
+                        
+                        # If no positive boost, track the best raw hf1 for potential ancestor-ignoring
+                        if potential_hf1 > best_unmatched_hf1:
+                            best_unmatched_hf1 = potential_hf1
+                            best_unmatched_gt_idx = gind
 
-                        # continue to next gt unless better class match made
-                        if metrics['hf1'] < hf1:
-                            continue
-                        # continue to next gt unless better match made
-                        if ious[dind,gind] < iou:
-                            continue
-                        # if match successful and best so far, store appropriately
-                        hf1=metrics['hf1']
-                        iou=ious[dind,gind]
-                        m=dind
-                        len_overlap = metrics['len_overlap']
 
-                    # if match made store id of match for both dt and gt
-                    if m ==-1:
-                        continue
-                    dtIg[tind,m]   = gtIg[gind]
-                    dtm[tind,m]    = g['id']
-                    gtm[tind,gind] = dt[m]['id']
-                    hierarchical_stats['overlaps'][tind, m] = len_overlap
-        # set unmatched detections outside of area range to ignore
-        a = np.array([d['area']<aRng[0] or d['area']>aRng[1] for d in dt]).reshape((1, len(dt)))
-        dtIg = np.logical_or(dtIg, np.logical_and(dtm==0, np.repeat(a,T,0)))
+                    # If a satisfactory match was found for this detection
+                    if best_gt_match_idx != -1:
+                        # Check if this GT was previously matched
+                        prev_d_idx = gtm_idx[tind, best_gt_match_idx]
+
+                        if prev_d_idx != -1:
+                            # This is a "steal". The previously matched detection must be re-evaluated.
+                            # Unset its previous match details
+                            dtm[tind, prev_d_idx] = 0
+                            d_matched[prev_d_idx] = False
+                            hierarchical_stats['overlaps'][tind, prev_d_idx] = 0
+                            # Add it back to the queue to find a new home.
+                            detections_to_process.insert(0, prev_d_idx)
+
+                        # Assign the new, better match
+                        g = gt[best_gt_match_idx]
+                        dtm[tind, dind] = g['id']
+                        gtm[tind, best_gt_match_idx] = d['id']
+                        gtm_idx[tind, best_gt_match_idx] = dind
+                        d_matched[dind] = True
+                        
+                        # Store the metrics of the new best match
+                        gt_hf1[tind, best_gt_match_idx] = best_match_metrics['hf1']
+                        hierarchical_stats['overlaps'][tind, dind] = best_match_metrics['len_overlap']
+                    
+                    # --- Integrated Ancestor-Ignoring Logic ---
+                    # If the detection couldn't find a match that offered a positive boost
+                    else:
+                        # Check if its best potential GT is already matched to a descendant
+                        if best_unmatched_gt_idx != -1:
+                            final_match_d_idx = gtm_idx[tind, best_unmatched_gt_idx]
+                            if final_match_d_idx != -1: # If the GT is matched
+                                final_match_d_label = self.label_to_name.get(dt[final_match_d_idx]['category_id'])
+                                # If the existing match is a descendant of the current detection, ignore current
+                                if (final_match_d_label and
+                                    self.hierarchy_tree.is_descendant(final_match_d_label, curr_d_label)):
+                                    dtIg[tind, dind] = True
+
+        # --- Consolidated Ignore Logic ---
+        # Find all GT IDs that are marked as ignore
+        ignored_gt_ids = [g['id'] for g in gt if g['_ignore']]
+        # Create a boolean mask where dtm has a match to an ignored GT.
+        # This is True for every (tind, dind) where the matched GT ID is in our ignored list.
+        matches_to_ignored_gt = np.isin(dtm, ignored_gt_ids)
+
+        # Update dtIg: a detection is ignored if it was already marked for ignoring (e.g., ancestor logic)
+        # OR if it's matched to an explicitly ignored GT.
+        dtIg = np.logical_or(dtIg, matches_to_ignored_gt)
+
+        # Vectorized check for unmatched detections outside the area range
+        a = np.array([d['area'] < aRng[0] or d['area'] > aRng[1] for d in dt]).reshape((1, len(dt)))
+        unmatched_and_outside_area = np.logical_and(dtm == 0, np.repeat(a, T, 0))
+        dtIg = np.logical_or(dtIg, unmatched_and_outside_area)
+
         # store results for given image
         return {
                 'image_id':     imgId,
@@ -324,7 +430,7 @@ class HierarchicalCOCOeval(COCOeval):
                 inds = np.argsort(-dtScores, kind='mergesort')
                 dtScoresSorted = dtScores[inds]
 
-                # dtm  = np.concatenate([e['dtMatches'][:,0:maxDet] for e in E], axis=1)[:,inds]
+                dtm  = np.concatenate([e['dtMatches'][:,0:maxDet] for e in E], axis=1)[:,inds]
                 dtIg = np.concatenate([e['dtIgnore'][:,0:maxDet]  for e in E], axis=1)[:,inds]
                 gtIg = np.concatenate([e['gtIgnore'] for e in E])
                 
@@ -363,8 +469,11 @@ class HierarchicalCOCOeval(COCOeval):
                         
                     else:
                         recall[t,a,m] = 0
-                    f1_curve = 2 * pr * rc / (pr + rc + 1e-6)
-                    f1[t, a, m] = np.max(f1_curve)
+                    if nd:
+                        f1_curve = 2 * pr * rc / (pr + rc + 1e-6)
+                        f1[t, a, m] = np.max(f1_curve) if f1_curve.size > 0 else 0
+                    else:
+                        f1[t, a, m] = 0
 
                     # numpy is slow without cython optimization for accessing elements
                     # use python array gets significant speed improvement
@@ -482,37 +591,40 @@ class HierarchicalCOCOeval(COCOeval):
 
 
 def hierarchical_prf_metric(
-    hierarchy_tree: HierarchyTree,
+    path_lookup: Dict,
     dt_label,
     gt_label,
-    label_to_name: Dict = None,
     return_paths: bool = False
 ):
     """Compute hierarchical precision, recall, and F1 between predicted and GT labels.
 
     Optionally returns the raw paths for additional use in aggregation.
     """
-    if label_to_name is not None:
-        dt_label = label_to_name.get(int(dt_label), str(dt_label))
-        gt_label = label_to_name.get(int(gt_label), str(gt_label))
+    dt_path = path_lookup.get(dt_label, set())
+    gt_path = path_lookup.get(gt_label, set())
 
-    dt_path = hierarchy_tree.get_path(dt_label)
-    gt_path = hierarchy_tree.get_path(gt_label)
-    overlap = set(dt_path) & set(gt_path)
-    hprecision = len(overlap) / len(dt_path)
-    hrecall = len(overlap) / len(gt_path)
-    hf1 = (2 * hprecision * hrecall / (hprecision + hrecall + 1e-6)) if (hprecision + hrecall) > 0 else 0.0
-    results = {
-        'hpr': hprecision,
-        'hr': hrecall,
-        'hf1': hf1,
-    }
+    len_dt_path = len(dt_path)
+    len_gt_path = len(gt_path)
+
+    if len_dt_path == 0 or len_gt_path == 0:
+        hf1 = 0.0
+        len_overlap = 0
+    else:
+        overlap = dt_path & gt_path
+        len_overlap = len(overlap)
+        hprecision = len_overlap / len_dt_path
+        hrecall = len_overlap / len_gt_path
+        if hprecision + hrecall == 0:
+            hf1 = 0.0
+        else:
+            hf1 = 2 * (hprecision * hrecall) / (hprecision + hrecall)
+
     if return_paths:
-        results.update({
-            'len_overlap': len(overlap),
-            'len_dt': len(dt_path),
-            'len_gt': len(gt_path),
-            'pred_path': dt_path,
-            'gt_path': gt_path,
-        })
-    return results
+        return {
+            'hf1': hf1,
+            'len_overlap': len_overlap,
+            'len_dt': len_dt_path,
+            'len_gt': len_gt_path,
+        }
+    else:
+        return hf1

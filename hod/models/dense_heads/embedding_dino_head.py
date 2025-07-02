@@ -75,7 +75,6 @@ class EmbeddingDINOHead(DINOHead):
         self.tree = None
         if ann_file:
             self.load_taxonomy(ann_file)
-            self._build_parent_children_index_map()
 
         if self.use_cone and loss_embed:
             self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
@@ -92,26 +91,6 @@ class EmbeddingDINOHead(DINOHead):
         taxonomy = ann.get('taxonomy', {})
         self.tree = HierarchyTree(taxonomy)
         self.class_to_idx = {c['name']: c['id'] for c in ann['categories']}
-        self.idx_to_class = {c['id']: c['name'] for c in ann['categories']}
-
-    def _build_parent_children_index_map(self):
-        # Assumes self.tree and self.class_to_idx are populated
-        self._parent_idx_to_children_indices = {}
-        if not self.tree or not self.class_to_idx: # Guard
-            return
-
-        for p_name, p_node in self.tree.class_to_node.items():
-            if p_name not in self.class_to_idx:
-                continue
-            p_idx = self.class_to_idx[p_name]
-
-            child_indices = []
-            for child_node in p_node.children:
-                if child_node.name in self.class_to_idx:
-                    child_indices.append(self.class_to_idx[child_node.name])
-
-            if child_indices: # Only add if it has mappable children
-                self._parent_idx_to_children_indices[p_idx] = child_indices
 
     def _init_layers(self, *args) -> None:
         """Initialize classification branch of head."""
@@ -182,116 +161,27 @@ class EmbeddingDINOHead(DINOHead):
 
         return loss_dict
 
-    def _get_empty_results(self, device):
-        results = InstanceData()
-        results.bboxes = torch.empty((0, 4), device=device)
-        results.scores = torch.empty((0,), device=device)
-        results.labels = torch.empty((0,), dtype=torch.long, device=device)
-        return results
-
     def _predict_by_feat_single(self,
                                 cls_score: Tensor,
                                 bbox_pred: Tensor,
                                 img_meta: dict,
                                 rescale: bool = True) -> InstanceData:
-        """Transform outputs from the last decoder layer into bbox predictions
-        for each image.
-
-        Args:
-            cls_score (Tensor): Box score logits from the last decoder layer
-                for each image. Shape [num_queries, cls_out_channels].
-            bbox_pred (Tensor): Sigmoid outputs from the last decoder layer
-                for each image, with coordinate format (cx, cy, w, h) and
-                shape [num_queries, 4].
-            img_meta (dict): Image meta info.
-            rescale (bool): If True, return boxes in original image
-                space. Default True.
-
-        Returns:
-            :obj:`InstanceData`: Detection results of each image
-            after the post process.
-            Each item usually contains following keys.
-
-                - scores (Tensor): Classification scores, has a shape
-                  (num_instance, )
-                - labels (Tensor): Labels of bboxes, has a shape
-                  (num_instances, ).
-                - bboxes (Tensor): Has a shape (num_instances, 4),
-                  the last dimension 4 arrange as (x1, y1, x2, y2).
+        """Transform outputs of a single image into bbox results.
+        check detr_head.py for more details.
         """
         assert len(cls_score) == len(bbox_pred)  # num_queries
         max_per_img = self.test_cfg.get('max_per_img', len(cls_score))
         img_shape = img_meta['img_shape']
         # exclude background
         if self.loss_cls.use_sigmoid:
-            # Check if hierarchical refinement is possible and enabled
-            use_hierarchical_refinement = (
-                self.tree is not None and 
-                self.class_to_idx and # Ensure mappings are present
-                hasattr(self, '_parent_idx_to_children_indices') and
-                self._parent_idx_to_children_indices # Ensure map is built and not empty
-            )
-            use_hierarchical_refinement = False # Disable for now
-            if use_hierarchical_refinement:
-                old_indexes = torch.empty((0,), device=cls_score.device)
-                cls_prob = cls_score.sigmoid()  # [num_queries, num_classes]
-
-                # Create a working copy of cls_prob for all queries. We'll modify only the selected ones.
-                refined_cls_prob = cls_prob.clone()
-
-                # --- Phase 1: Determine Dynamic Activation Threshold ---
-                scores, indexes = refined_cls_prob.view(-1).topk(max_per_img)
-                activation_threshold = scores[30] # The 30th score in the top-k is the threshold
-                og_indexes = indexes.clone()
-                # --- Phase 2: Hierarchical Refinement ---
-                while not torch.equal(old_indexes, indexes):
-                    old_indexes = indexes.clone()
-                    for _, idx in zip(scores, old_indexes):
-                        det_labels = idx % self.num_classes
-                        bbox_index = idx // self.num_classes
-
-                        for p_idx in range(self.cls_out_channels): # cls_out_channels is num_classes here
-                            if self.has_activated_descendant(p_idx, refined_cls_prob[bbox_index], activation_threshold):
-                                # Suppress the parent class if any child is activated
-                                refined_cls_prob[bbox_index, p_idx] = -1
-
-                    # After processing all top-k scores, we can now find the new top-k
-                    scores, indexes = refined_cls_prob.view(-1).topk(max_per_img)
-                    activation_threshold = scores[30]
-
-                # --- Phase 3: Final Selection ---
-                det_labels = indexes % self.num_classes
-                bbox_index = indexes // self.num_classes
-                bbox_pred = bbox_pred[bbox_index]
-
-            else: # Fallback to standard DINOHead sigmoid logic
-                # cls_score shape: [num_queries, num_classes]
-                cls_prob = cls_score.sigmoid()
-                # Find the max score and class index per query
-                # scores_per_query shape: [num_queries]
-                # labels_per_query shape: [num_queries]
-                scores_per_query, labels_per_query = cls_prob.max(dim=-1)
-                # Select top-k queries based on their max score
-                # scores shape: [max_per_img]
-                # bbox_index shape: [max_per_img]
-                num_to_select = min(max_per_img, scores_per_query.size(0))
-                if num_to_select == 0: return self._get_empty_results(cls_score.device)
-
-                scores, bbox_index = scores_per_query.topk(num_to_select)
-                # Get the labels and bbox predictions for the selected queries
-                det_labels = labels_per_query[bbox_index]
-                bbox_pred = bbox_pred[bbox_index]
+            cls_score = cls_score.sigmoid()
+            scores, indexes = cls_score.view(-1).topk(max_per_img)
+            det_labels = indexes % self.num_classes
+            bbox_index = indexes // self.num_classes
+            bbox_pred = bbox_pred[bbox_index]
         else:
-            # cls_score shape: [num_queries, num_classes + 1]
-            # Find the max score excluding the background class (last channel)
-            # scores shape: [num_queries]
-            # det_labels shape: [num_queries]
             scores, det_labels = F.softmax(cls_score, dim=-1)[..., :-1].max(-1)
-            # Select top-k queries based on their max score
-            # scores shape: [max_per_img]
-            # bbox_index shape: [max_per_img]
             scores, bbox_index = scores.topk(max_per_img)
-            # Get the bbox predictions and labels for the selected queries
             bbox_pred = bbox_pred[bbox_index]
             det_labels = det_labels[bbox_index]
 
@@ -311,17 +201,3 @@ class EmbeddingDINOHead(DINOHead):
         results.labels = det_labels
         results.bbox_index = bbox_index
         return results
-
-    def has_activated_descendant(self, p_idx, cls_probs, threshold):
-        # Check if p_idx has children and if any are activated
-        children_indices_of_p = self._parent_idx_to_children_indices.get(p_idx, [])
-        if not children_indices_of_p: # Not a parent with known children in class_to_idx
-            return False
-
-        for c_idx in children_indices_of_p:
-            if cls_probs[c_idx] >= threshold:
-                return True
-            if self.has_activated_descendant(c_idx, cls_probs, threshold):
-                return True
-
-        return False
