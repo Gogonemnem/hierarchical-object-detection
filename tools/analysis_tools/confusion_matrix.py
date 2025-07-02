@@ -3,7 +3,6 @@ import os
 import textwrap
 
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.ticker import MultipleLocator
 from mmcv.ops import nms
@@ -48,13 +47,6 @@ def parse_args():
         default=None,
         help='nms IoU threshold, only applied when users want to change the'
         'nms IoU threshold.')
-    parser.add_argument(
-        '--aggregation-level',
-        type=int,
-        default=None,
-        help='Specific hierarchy level (0-indexed) to aggregate at for the confusion matrix. '
-             'If not set, matrices for all levels are generated, from level 0 (root) '
-             'to the max depth of the hierarchy (leaf level).')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -224,42 +216,77 @@ def aggregate_confusion_matrix(
             f"number of node labels {num_original_nodes} + background."
         )
 
-    node_to_group_map = {}
-    for node_label in node_labels_in_cm_order:
-        node_to_group_map[node_label] = _get_node_group_at_agg_level(node_label, tree, agg_level)
+    node_to_group_map = {
+        node_label: _get_node_group_at_agg_level(node_label, tree, agg_level)
+        for node_label in tree.all_classes()
+    }
 
-    unique_group_names = sorted(list(set(node_to_group_map.values())))
-    aggregated_labels_no_bg = unique_group_names
+    # Define the labels for this level: nodes at this depth AND leaf nodes that are deeper.
+    # Leaf nodes must be preserved at all aggregation levels once they appear.
+    groups_at_this_level = []
+    seen_groups = set()
+    for leaf in node_labels_in_cm_order:
+        group = node_to_group_map.get(leaf)
+        if group and group not in seen_groups:
+            group_node = tree.class_to_node.get(group)
+            if group_node:
+                # Include groups that are exactly at this level OR leaf nodes at deeper levels
+                if (group_node.get_depth() == agg_level or group_node.is_leaf()):
+                    groups_at_this_level.append(group)
+                    seen_groups.add(group)
+
+    aggregated_labels_no_bg = groups_at_this_level
     aggregated_labels_with_bg = aggregated_labels_no_bg + ['background']
     
     group_to_idx_map = {name: i for i, name in enumerate(aggregated_labels_no_bg)}
     num_aggregated_classes = len(aggregated_labels_no_bg)
     aggregated_cm = np.zeros((num_aggregated_classes + 1, num_aggregated_classes + 1), dtype=original_cm.dtype)
 
-    for i in range(num_original_nodes):
-        original_gt_node = node_labels_in_cm_order[i]
-        new_gt_group = node_to_group_map[original_gt_node]
-        new_gt_idx = group_to_idx_map[new_gt_group]
+    # --- Main Aggregation Loop ---
+    for i, gt_node_name in enumerate(node_labels_in_cm_order):
+        gt_group = node_to_group_map.get(gt_node_name)
+        if gt_group not in group_to_idx_map:
+            continue
+        gt_idx = group_to_idx_map[gt_group]
 
-        for j in range(num_original_nodes):
-            original_pred_node = node_labels_in_cm_order[j]
-            new_pred_group = node_to_group_map[original_pred_node]
-            new_pred_idx = group_to_idx_map[new_pred_group]
+        for j, dt_node_name in enumerate(node_labels_in_cm_order):
+            # Key Filtering Logic:
+            # If a prediction is for a node at a HIGHER level (shallower depth),
+            # it should ALWAYS go to background, regardless of ancestry relationships
+            dt_node = tree.class_to_node.get(dt_node_name)
+            if dt_node.get_depth() < agg_level and not dt_node.is_leaf():
+                # All ancestor predictions which are not leaves go to background
+                dt_idx = num_aggregated_classes
+            else:
+                # Otherwise, aggregate it up to the current level normally.
+                dt_group = node_to_group_map.get(dt_node_name)
+                if dt_group not in group_to_idx_map:
+                    continue  # Skip if no group mapping exists
+                dt_idx = group_to_idx_map[dt_group]
             
-            aggregated_cm[new_gt_idx, new_pred_idx] += original_cm[i, j]
+            aggregated_cm[gt_idx, dt_idx] += original_cm[i, j]
 
-        # Handle background predictions for the current GT group
-        aggregated_cm[new_gt_idx, num_aggregated_classes] += original_cm[i, num_original_nodes]
+        # Handle original background predictions for the current GT group
+        aggregated_cm[gt_idx, num_aggregated_classes] += original_cm[i, num_original_nodes]
 
-    # Handle GT background predictions against aggregated prediction groups
-    for j in range(num_original_nodes):
-        original_pred_node = node_labels_in_cm_order[j]
-        new_pred_group = node_to_group_map[original_pred_node]
-        new_pred_idx = group_to_idx_map[new_pred_group]
+    # --- Handle GT Background Row ---
+    for j, dt_node_name in enumerate(node_labels_in_cm_order):
+        dt_node = tree.class_to_node.get(dt_node_name)
+
+        # For background GT, ancestor predictions should still be mapped to background
+        # since there's no specific GT class to match against
+        if dt_node.get_depth() < agg_level and not dt_node.is_leaf():
+            new_pred_idx = num_aggregated_classes  # Remap to background
+        else:
+            dt_group = node_to_group_map.get(dt_node_name)
+            if dt_group not in group_to_idx_map:
+                continue  # Skip if no group mapping exists
+            new_pred_idx = group_to_idx_map[dt_group]
+        
         aggregated_cm[num_aggregated_classes, new_pred_idx] += original_cm[num_original_nodes, j]
     
-    # Sum of GT background to predicted background
-    aggregated_cm[num_aggregated_classes, num_aggregated_classes] = original_cm[num_original_nodes, num_original_nodes]
+    # Sum of original GT background to predicted background
+    aggregated_cm[num_aggregated_classes, num_aggregated_classes] += original_cm[num_original_nodes, num_original_nodes]
 
     return aggregated_cm, aggregated_labels_with_bg
 
@@ -284,13 +311,23 @@ def calculate_confusion_matrix(dataset,
     """
     num_classes = len(dataset.metainfo['classes'])
     confusion_matrix = np.zeros(shape=[num_classes + 1, num_classes + 1])
+    # Hierarchical setup
+    tree = None
+    path_lookup = None
+    class_names = dataset.metainfo['classes']
+    if 'taxonomy' in dataset.metainfo:
+        tree = HierarchyTree(dataset.metainfo['taxonomy'])
+        path_lookup = {}
+        for name in tree.class_to_node.keys():
+            path_lookup[name] = set(tree.get_path(name))
+
     assert len(dataset) == len(results)
     prog_bar = ProgressBar(len(results))
     for idx, per_img_res in enumerate(results):
         res_bboxes = per_img_res['pred_instances']
         gts = dataset.get_data_info(idx)['instances']
         analyze_per_img_dets(confusion_matrix, gts, res_bboxes, score_thr,
-                             tp_iou_thr, nms_iou_thr)
+                             tp_iou_thr, nms_iou_thr, class_names, tree, path_lookup)
         prog_bar.update()
     return confusion_matrix
 
@@ -300,81 +337,240 @@ def analyze_per_img_dets(confusion_matrix,
                          result,
                          score_thr=0,
                          tp_iou_thr=0.5,
-                         nms_iou_thr=None):
-    """Analyze detection results on each image.
+                         nms_iou_thr=None,
+                         class_names=None,
+                         tree=None,
+                         path_lookup=None):
+    """Analyze detection results on each image using non-greedy hierarchical matching.
 
     Args:
-        confusion_matrix (ndarray): The confusion matrix,
-            has shape (num_classes + 1, num_classes + 1).
-        gt_bboxes (ndarray): Ground truth bboxes, has shape (num_gt, 4).
-        gt_labels (ndarray): Ground truth labels, has shape (num_gt).
-        result (ndarray): Detection results, has shape
-            (num_classes, num_bboxes, 5).
+        confusion_matrix (ndarray): The confusion matrix.
+        gts (list): Ground truth instances.
+        result (dict): Detection results from the model.
         score_thr (float): Score threshold to filter bboxes.
-            Default: 0.
         tp_iou_thr (float): IoU threshold to be considered as matched.
-            Default: 0.5.
-        nms_iou_thr (float|optional): nms IoU threshold, the detection results
-            have done nms in the detector, only applied when users want to
-            change the nms IoU threshold. Default: None.
+        nms_iou_thr (float|optional): NMS IoU threshold.
+        class_names (list): List of class names.
+        tree (HierarchyTree): The hierarchy tree.
+        path_lookup (dict): Lookup table for hierarchy paths.
     """
-    true_positives = np.zeros(len(gts))
-    gt_bboxes = []
-    gt_labels = []
-    for gt in gts:
-        gt_bboxes.append(gt['bbox'])
-        gt_labels.append(gt['bbox_label'])
+    # Use standard matching if no hierarchy is provided
+    if tree is None or path_lookup is None:
+        # This is the original greedy matching logic from this file
+        true_positives = np.zeros(len(gts))
+        gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
+        gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
 
-    gt_bboxes = np.array(gt_bboxes)
-    gt_labels = np.array(gt_labels)
+        det_labels_all = result['labels'].cpu().numpy() if hasattr(result['labels'], 'cpu') else np.array(result['labels'])
+        det_bboxes_all = result['bboxes'].cpu().numpy() if hasattr(result['bboxes'], 'cpu') else np.array(result['bboxes'])
+        det_scores_all = result['scores'].cpu().numpy() if hasattr(result['scores'], 'cpu') else np.array(result['scores'])
 
-    det_labels_all = result['labels'].cpu().numpy() if hasattr(result['labels'], 'cpu') else np.array(result['labels'])
-    det_bboxes_all = result['bboxes'].cpu().numpy() if hasattr(result['bboxes'], 'cpu') else np.array(result['bboxes'])
-    det_scores_all = result['scores'].cpu().numpy() if hasattr(result['scores'], 'cpu') else np.array(result['scores'])
+        unique_det_labels = np.unique(det_labels_all)
+        num_classes = confusion_matrix.shape[0] - 1
 
-    unique_det_labels = np.unique(det_labels_all)
-    num_classes = confusion_matrix.shape[0] - 1
+        for det_label in unique_det_labels:
+            if det_label >= num_classes:
+                continue
 
-    for det_label in unique_det_labels:
-        if det_label >= num_classes:
-            continue
+            mask = (det_labels_all == det_label) & (det_scores_all >= score_thr)
+            det_bboxes = det_bboxes_all[mask]
 
-        mask = (det_labels_all == det_label) & (det_scores_all >= score_thr)
-        det_bboxes = det_bboxes_all[mask]
+            if len(det_bboxes) == 0:
+                continue
 
-        if len(det_bboxes) == 0:
-            continue
+            if nms_iou_thr:
+                # Placeholder for NMS if needed, current logic processes per class
+                pass
 
-        if nms_iou_thr:
-            pass
+            if len(gt_bboxes) == 0:
+                for _ in range(len(det_bboxes)):
+                    confusion_matrix[num_classes, det_label] += 1
+                continue
 
-        if len(gt_bboxes) == 0:
-            for _ in range(len(det_bboxes)):
-                confusion_matrix[num_classes, det_label] += 1
-            continue
+            ious = bbox_overlaps(det_bboxes[:, :4], gt_bboxes)
+            for i in range(len(det_bboxes)):
+                matched_gt = -1
+                best_iou = tp_iou_thr
 
-        ious = bbox_overlaps(det_bboxes[:, :4], gt_bboxes)
-        for i in range(len(det_bboxes)):
-            matched_gt = -1
-            best_iou = tp_iou_thr
-
-            for j in range(len(gt_bboxes)):
-                if ious[i, j] >= best_iou:
-                    best_iou = ious[i, j]
-                    matched_gt = j
-            
-            if matched_gt != -1:
-                if true_positives[matched_gt] == 0:
-                    true_positives[matched_gt] = 1
-                    confusion_matrix[gt_labels[matched_gt], det_label] += 1
+                for j in range(len(gt_bboxes)):
+                    if ious[i, j] >= best_iou:
+                        best_iou = ious[i, j]
+                        matched_gt = j
+                
+                if matched_gt != -1:
+                    if true_positives[matched_gt] == 0:
+                        true_positives[matched_gt] = 1
+                        confusion_matrix[gt_labels[matched_gt], det_label] += 1
+                    else:
+                        confusion_matrix[num_classes, det_label] += 1
                 else:
                     confusion_matrix[num_classes, det_label] += 1
-            else:
-                confusion_matrix[num_classes, det_label] += 1
 
-    for i in range(len(gt_labels)):
-        if true_positives[i] == 0:
-            confusion_matrix[gt_labels[i], num_classes] += 1
+        for i in range(len(gt_labels)):
+            if true_positives[i] == 0:
+                confusion_matrix[gt_labels[i], num_classes] += 1
+        return
+
+    # Hierarchical Matching Logic
+    assert class_names is not None
+
+    # 1. Data Preparation
+    gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
+    gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
+    det_scores = result['scores'].numpy()
+    score_mask = det_scores >= score_thr
+    det_bboxes = result['bboxes'].numpy()[score_mask]
+    det_labels = result['labels'].numpy()[score_mask]
+    det_scores = det_scores[score_mask]
+
+    if nms_iou_thr and len(det_bboxes) > 0:
+        det_bboxes, keep = nms(det_bboxes, det_scores, nms_iou_thr)
+        det_labels = det_labels[keep]
+        det_scores = det_scores[keep]
+
+    # Sort detections by score for processing order
+    sort_inds = np.argsort(-det_scores)
+    det_bboxes = det_bboxes[sort_inds]
+    det_labels = det_labels[sort_inds]
+    det_scores = det_scores[sort_inds]
+
+    D = len(det_labels)
+    G = len(gt_labels)
+    num_classes = confusion_matrix.shape[0] - 1
+
+    if G == 0:
+        for d_label in det_labels:
+            confusion_matrix[num_classes, d_label] += 1
+        return
+
+    if D == 0:
+        for g_label in gt_labels:
+            confusion_matrix[g_label, num_classes] += 1
+        return
+
+    # 2. Pre-calculate IoUs
+    ious = bbox_overlaps(det_bboxes, gt_bboxes)
+
+    # 3. Initialization for Non-Greedy Matching
+    gtm_idx = -np.ones(G, dtype=int)
+    gt_hf1 = np.zeros(G)
+    d_matched = np.zeros(D, dtype=bool)
+    dtIg = np.zeros(D, dtype=bool)
+
+    detections_to_process = list(range(D))
+    label_to_name = {i: name for i, name in enumerate(class_names)}
+
+    # 4. Iterative Matching with Stealing
+    while detections_to_process:
+        dind = detections_to_process.pop(0)
+        d_label_name = label_to_name.get(det_labels[dind])
+        if not d_label_name:
+            continue
+
+        best_boost = 1e-9
+        best_gt_match_idx = -1
+        best_iou = -1.0
+        best_unmatched_hf1 = -1.0
+        best_unmatched_gt_idx = -1
+
+        for gind in range(G):
+            if ious[dind, gind] < tp_iou_thr:
+                continue
+
+            gt_label_name = label_to_name.get(gt_labels[gind])
+            if not gt_label_name:
+                continue
+
+            metrics = hierarchical_prf_metric(path_lookup, d_label_name, gt_label_name, return_paths=True)
+            potential_hf1 = metrics.get('hf1', 0.0) if isinstance(metrics, dict) else 0.0
+
+            existing_hf1 = gt_hf1[gind]
+            boost = potential_hf1 - existing_hf1
+
+            if boost > best_boost or (boost == best_boost and ious[dind, gind] > best_iou):
+                best_boost = boost
+                best_gt_match_idx = gind
+                best_iou = ious[dind, gind]
+
+            if potential_hf1 > best_unmatched_hf1:
+                best_unmatched_hf1 = potential_hf1
+                best_unmatched_gt_idx = gind
+
+        if best_gt_match_idx != -1:
+            prev_d_idx = gtm_idx[best_gt_match_idx]
+            if prev_d_idx != -1:
+                d_matched[prev_d_idx] = False
+                detections_to_process.insert(0, prev_d_idx)
+
+            gtm_idx[best_gt_match_idx] = dind
+            gt_hf1[best_gt_match_idx] = best_boost + gt_hf1[best_gt_match_idx]
+            d_matched[dind] = True
+        else:
+            # 5. Ancestor-Ignoring Logic
+            if best_unmatched_gt_idx != -1:
+                final_match_d_idx = gtm_idx[best_unmatched_gt_idx]
+                if final_match_d_idx != -1:
+                    final_match_d_label = label_to_name.get(det_labels[final_match_d_idx])
+                    if final_match_d_label and tree.is_descendant(final_match_d_label, d_label_name):
+                        dtIg[dind] = True
+
+    # 6. Update Confusion Matrix
+    gt_matched_by_any_det = np.zeros(G, dtype=bool)
+    for dind in range(D):
+        if d_matched[dind]:
+            matched_gind = np.where(gtm_idx == dind)[0]
+            if len(matched_gind) > 0:
+                gind = matched_gind[0]
+                gt_label = gt_labels[gind]
+                det_label = det_labels[dind]
+                confusion_matrix[gt_label, det_label] += 1
+                gt_matched_by_any_det[gind] = True
+        elif not dtIg[dind]:
+            confusion_matrix[num_classes, det_labels[dind]] += 1
+
+    for gind in range(G):
+        if not gt_matched_by_any_det[gind]:
+            confusion_matrix[gt_labels[gind], num_classes] += 1
+
+
+def hierarchical_prf_metric(
+    path_lookup: dict,
+    dt_label,
+    gt_label,
+    return_paths: bool = False
+):
+    """Compute hierarchical precision, recall, and F1 between predicted and GT labels.
+
+    Optionally returns the raw paths for additional use in aggregation.
+    """
+    dt_path = path_lookup.get(dt_label, set())
+    gt_path = path_lookup.get(gt_label, set())
+
+    len_dt_path = len(dt_path)
+    len_gt_path = len(gt_path)
+
+    if len_dt_path == 0 or len_gt_path == 0:
+        hf1 = 0.0
+        len_overlap = 0
+    else:
+        overlap = dt_path & gt_path
+        len_overlap = len(overlap)
+        hprecision = len_overlap / len_dt_path
+        hrecall = len_overlap / len_gt_path
+        if hprecision + hrecall == 0:
+            hf1 = 0.0
+        else:
+            hf1 = 2 * (hprecision * hrecall) / (hprecision + hrecall)
+
+    if return_paths:
+        return {
+            'hf1': hf1,
+            'len_overlap': len_overlap,
+            'len_dt': len_dt_path,
+            'len_gt': len_gt_path,
+        }
+    else:
+        return hf1
 
 
 def plot_confusion_matrix(confusion_matrix,
@@ -565,6 +761,7 @@ def main():
             # Build boundaries and the final sorted order using ONLY these plottable leaves
             # build_nested_boundaries returns the sorted list as its first element
             flat_tax_sorted, boundaries_for_plot = build_nested_boundaries(plottable_leaves_with_paths_unsorted)
+            # raise Exception(f"flat_tax_sorted: {flat_tax_sorted}, boundaries_for_plot: {boundaries_for_plot}")
             ordered_leaf_names = [item[0] for item in flat_tax_sorted] # Final order for plot
 
             dataset_classes_excluded = [
@@ -575,19 +772,8 @@ def main():
                       f"or are not part of the plottable set, and will be EXCLUDED from the hierarchical "
                       f"confusion matrix: {dataset_classes_excluded}")
 
-            new_order_indices = [original_label_to_idx[label] for label in ordered_leaf_names]
-            
-            reordered_cm_main = confusion_matrix_raw[:num_classes_no_bg, :num_classes_no_bg][np.ix_(new_order_indices, new_order_indices)]
-            bg_row_reordered = confusion_matrix_raw[num_classes_no_bg, :num_classes_no_bg][new_order_indices]
-            bg_col_reordered = confusion_matrix_raw[:num_classes_no_bg, num_classes_no_bg][new_order_indices]
-
-            final_num_classes = len(ordered_leaf_names)
-            confusion_matrix_to_plot = np.zeros((final_num_classes + 1, final_num_classes + 1))
-            
-            confusion_matrix_to_plot[:final_num_classes, :final_num_classes] = reordered_cm_main
-            confusion_matrix_to_plot[final_num_classes, :final_num_classes] = bg_row_reordered
-            confusion_matrix_to_plot[:final_num_classes, final_num_classes] = bg_col_reordered
-            confusion_matrix_to_plot[final_num_classes, final_num_classes] = confusion_matrix_raw[num_classes_no_bg, num_classes_no_bg]
+            # Reorder the entire matrix, including the background row/column, in one step
+            confusion_matrix_to_plot = confusion_matrix_raw
 
             labels_to_plot = ordered_leaf_names + ['background']
 
@@ -619,16 +805,8 @@ def main():
         ordered_labels_leaf_for_agg = ordered_leaf_names # These are the leaves in confusion_matrix_to_plot
 
         levels_to_aggregate = []
-        if args.aggregation_level is not None:
-            if 0 <= args.aggregation_level <= max_agg_level:
-                levels_to_aggregate = [args.aggregation_level]
-                print(f"Plotting for specified aggregation level: {args.aggregation_level} (0-indexed).")
-            else:
-                print(f"Warning: Specified aggregation level {args.aggregation_level} is out of range (0-{max_agg_level}). Plotting all levels instead.")
-                levels_to_aggregate = range(0, max_agg_level + 1)
-        else:
-            print(f"Plotting all aggregation levels from 0 (root) to {max_agg_level} (leaves).")
-            levels_to_aggregate = range(0, max_agg_level + 1)
+        print(f"Plotting all aggregation levels from 0 (root) to {max_agg_level} (leaves).")
+        levels_to_aggregate = range(0, max_agg_level + 1)
 
         for level in levels_to_aggregate:
             if not ordered_labels_leaf_for_agg:
@@ -640,7 +818,7 @@ def main():
                 confusion_matrix_to_plot, 
                 taxonomy_tree, 
                 level, 
-                ordered_labels_leaf_for_agg
+                dataset.metainfo['classes']
             )
 
             plot_matrix = current_agg_matrix

@@ -127,13 +127,21 @@ def calculate_confusion_matrix(dataset,
     """
     num_classes = len(dataset.metainfo['classes'])
     confusion_matrix = np.zeros(shape=[num_classes + 1, num_classes + 1])
+
+    # Hierarchical setup
+    tree = HierarchyTree(dataset.metainfo['taxonomy'])
+    path_lookup = {}
+    for name in tree.class_to_node.keys():
+        path_lookup[name] = set(tree.get_path(name))
+    class_names = dataset.metainfo['classes']
+
     assert len(dataset) == len(results)
     prog_bar = ProgressBar(len(results))
     for idx, per_img_res in enumerate(results):
         res_bboxes = per_img_res['pred_instances']
         gts = dataset.get_data_info(idx)['instances']
         analyze_per_img_dets(confusion_matrix, gts, res_bboxes, score_thr,
-                             tp_iou_thr, nms_iou_thr)
+                             tp_iou_thr, nms_iou_thr, class_names, tree, path_lookup)
         prog_bar.update()
     return confusion_matrix
 
@@ -143,83 +151,194 @@ def analyze_per_img_dets(confusion_matrix,
                          result,
                          score_thr=0,
                          tp_iou_thr=0.5,
-                         nms_iou_thr=None):
-    """Analyze detection results on each image.
+                         nms_iou_thr=None,
+                         class_names=None,
+                         tree=None,
+                         path_lookup=None):
+    """Analyze detection results on each image using non-greedy hierarchical matching.
 
     Args:
-        confusion_matrix (ndarray): The confusion matrix,
-            has shape (num_classes + 1, num_classes + 1).
-        gt_bboxes (ndarray): Ground truth bboxes, has shape (num_gt, 4).
-        gt_labels (ndarray): Ground truth labels, has shape (num_gt).
-        result (ndarray): Detection results, has shape
-            (num_classes, num_bboxes, 5).
+        confusion_matrix (ndarray): The confusion matrix.
+        gts (list): Ground truth instances.
+        result (dict): Detection results from the model.
         score_thr (float): Score threshold to filter bboxes.
-            Default: 0.
         tp_iou_thr (float): IoU threshold to be considered as matched.
-            Default: 0.5.
-        nms_iou_thr (float|optional): nms IoU threshold, the detection results
-            have done nms in the detector, only applied when users want to
-            change the nms IoU threshold. Default: None.
+        nms_iou_thr (float|optional): NMS IoU threshold.
+        class_names (list): List of class names.
+        tree (HierarchyTree): The hierarchy tree.
+        path_lookup (dict): Lookup table for hierarchy paths.
     """
-    # 1. Extract and prepare GT and detection data
+    assert class_names is not None
+    assert tree is not None
+    assert path_lookup is not None
+
+    # 1. Data Preparation
     gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
     gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
-    gt_matched = np.zeros(len(gts), dtype=bool)
-
     det_scores = result['scores'].numpy()
     score_mask = det_scores >= score_thr
     det_bboxes = result['bboxes'].numpy()[score_mask]
     det_labels = result['labels'].numpy()[score_mask]
     det_scores = det_scores[score_mask]
 
-    # Optional NMS. Note: The original implementation had a bug here.
-    # This is a more robust way to handle it.
     if nms_iou_thr and len(det_bboxes) > 0:
-        det_bboxes_with_scores = np.hstack([det_bboxes, det_scores[:, np.newaxis]])
         keep = nms(det_bboxes, det_scores, nms_iou_thr)
         det_bboxes = det_bboxes[keep]
         det_labels = det_labels[keep]
         det_scores = det_scores[keep]
 
-    # 2. Sort detections by score for greedy matching
+    # Sort detections by score for processing order
     sort_inds = np.argsort(-det_scores)
+    det_bboxes = det_bboxes[sort_inds]
+    det_labels = det_labels[sort_inds]
+    det_scores = det_scores[sort_inds]
 
-    # 3. Perform greedy matching
-    if len(gts) > 0 and len(det_bboxes) > 0:
-        # Pre-calculate all IoUs between filtered detections and GTs
-        ious = bbox_overlaps(det_bboxes[sort_inds, :4], gt_bboxes)
+    D = len(det_labels)
+    G = len(gt_labels)
 
-        for i in range(len(sort_inds)):
-            det_label = det_labels[sort_inds[i]]
-            iou_row = ious[i, :]
-            
-            best_gt_idx = -1
-            max_iou = -1
+    if G == 0:
+        # All detections are background FPs
+        for d_label in det_labels:
+            confusion_matrix[-1, d_label] += 1
+        return
 
-            # Find the best available (unmatched) GT for this detection
-            for j in range(len(gts)):
-                if not gt_matched[j] and iou_row[j] > max_iou:
-                    max_iou = iou_row[j]
-                    best_gt_idx = j
-            
-            if max_iou >= tp_iou_thr:
-                # Match found: claim the GT and update confusion matrix
-                gt_matched[best_gt_idx] = True
-                gt_label_of_match = gt_labels[best_gt_idx]
-                confusion_matrix[gt_label_of_match, det_label] += 1
+    if D == 0:
+        # All GTs are FNs
+        for g_label in gt_labels:
+            confusion_matrix[g_label, -1] += 1
+        return
+
+    # 2. Pre-calculate IoUs
+    ious = bbox_overlaps(det_bboxes, gt_bboxes)
+
+    # 3. Initialization for Non-Greedy Matching
+    gtm_idx = -np.ones(G, dtype=int)  # Matched detection index for each GT
+    gt_hf1 = np.zeros(G)             # HF1 score for the match of each GT
+    d_matched = np.zeros(D, dtype=bool) # Which detections have been matched
+    dtIg = np.zeros(D, dtype=bool)      # Ignored detections (ancestor-ignoring)
+
+    detections_to_process = list(range(D))
+    label_to_name = {i: name for i, name in enumerate(class_names)}
+
+    # 4. Iterative Matching with Stealing
+    while detections_to_process:
+        dind = detections_to_process.pop(0)
+        d_label_name = label_to_name.get(det_labels[dind])
+        if not d_label_name:
+            continue
+
+        best_boost = 1e-9
+        best_gt_match_idx = -1
+        best_iou = -1.0
+        best_unmatched_hf1 = -1.0
+        best_unmatched_gt_idx = -1
+
+        for gind in range(G):
+            if ious[dind, gind] < tp_iou_thr:
+                continue
+
+            gt_label_name = label_to_name.get(gt_labels[gind])
+            if not gt_label_name:
+                continue
+
+            metrics = hierarchical_prf_metric(path_lookup, d_label_name, gt_label_name, return_paths=True)
+            if isinstance(metrics, dict):
+                potential_hf1 = metrics.get('hf1', 0.0)
             else:
-                # No suitable GT match: this is a background FP
-                confusion_matrix[-1, det_label] += 1
-    
-    # Handle case where there are detections but no GTs (all FPs)
-    elif len(gts) == 0 and len(det_bboxes) > 0:
-        for i in range(len(det_bboxes)):
-            confusion_matrix[-1, det_labels[i]] += 1
+                potential_hf1 = 0.0
 
-    # 4. Account for any unmatched GTs as False Negatives
-    for j in range(len(gts)):
-        if not gt_matched[j]:
-            confusion_matrix[gt_labels[j], -1] += 1
+            existing_hf1 = gt_hf1[gind]
+            boost = potential_hf1 - existing_hf1
+
+            if boost > best_boost or (boost == best_boost and ious[dind, gind] > best_iou):
+                best_boost = boost
+                best_gt_match_idx = gind
+                best_iou = ious[dind, gind]
+
+            if potential_hf1 > best_unmatched_hf1:
+                best_unmatched_hf1 = potential_hf1
+                best_unmatched_gt_idx = gind
+
+        if best_gt_match_idx != -1:
+            prev_d_idx = gtm_idx[best_gt_match_idx]
+            if prev_d_idx != -1:
+                # Steal: requeue the old detection
+                d_matched[prev_d_idx] = False
+                detections_to_process.insert(0, prev_d_idx)
+
+            # Assign new match
+            gtm_idx[best_gt_match_idx] = dind
+            gt_hf1[best_gt_match_idx] = best_boost + gt_hf1[best_gt_match_idx]
+            d_matched[dind] = True
+        else:
+            # 5. Ancestor-Ignoring Logic
+            if best_unmatched_gt_idx != -1:
+                final_match_d_idx = gtm_idx[best_unmatched_gt_idx]
+                if final_match_d_idx != -1:
+                    final_match_d_label = label_to_name.get(det_labels[final_match_d_idx])
+                    if final_match_d_label and tree.is_descendant(final_match_d_label, d_label_name):
+                        dtIg[dind] = True
+
+    # 6. Update Confusion Matrix based on final matches
+    gt_matched_by_any_det = np.zeros(G, dtype=bool)
+    for dind in range(D):
+        if d_matched[dind]:
+            # Find which GT this detection is matched to
+            matched_gind = np.where(gtm_idx == dind)[0]
+            if len(matched_gind) > 0:
+                gind = matched_gind[0]
+                gt_label = gt_labels[gind]
+                det_label = det_labels[dind]
+                confusion_matrix[gt_label, det_label] += 1
+                gt_matched_by_any_det[gind] = True
+        elif not dtIg[dind]:
+            # Unmatched and not ignored -> Background FP
+            confusion_matrix[-1, det_labels[dind]] += 1
+
+    # Unmatched GTs are FNs
+    for gind in range(G):
+        if not gt_matched_by_any_det[gind]:
+            confusion_matrix[gt_labels[gind], -1] += 1
+
+
+def hierarchical_prf_metric(
+    path_lookup: dict,
+    dt_label,
+    gt_label,
+    return_paths: bool = False
+):
+    """Compute hierarchical precision, recall, and F1 between predicted and GT labels.
+
+    Optionally returns the raw paths for additional use in aggregation.
+    """
+    dt_path = path_lookup.get(dt_label, set())
+    gt_path = path_lookup.get(gt_label, set())
+
+    len_dt_path = len(dt_path)
+    len_gt_path = len(gt_path)
+
+    if len_dt_path == 0 or len_gt_path == 0:
+        hf1 = 0.0
+        len_overlap = 0
+    else:
+        overlap = dt_path & gt_path
+        len_overlap = len(overlap)
+        hprecision = len_overlap / len_dt_path
+        hrecall = len_overlap / len_gt_path
+        if hprecision + hrecall == 0:
+            hf1 = 0.0
+        else:
+            hf1 = 2 * (hprecision * hrecall) / (hprecision + hrecall)
+
+    if return_paths:
+        return {
+            'hf1': hf1,
+            'len_overlap': len_overlap,
+            'len_dt': len_dt_path,
+            'len_gt': len_gt_path,
+        }
+    else:
+        return hf1
 
 
 def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, verbose=False):
