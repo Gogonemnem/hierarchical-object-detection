@@ -176,13 +176,13 @@ class EmbeddingDINOHead(DINOHead):
         if self.loss_cls.use_sigmoid:
             cls_score = cls_score.sigmoid()
             # case: multi label per query
-            scores, indexes = cls_score.view(-1).topk(max_per_img)
-            det_labels = indexes % self.num_classes
-            bbox_index = indexes // self.num_classes
+            # scores, indexes = cls_score.view(-1).topk(max_per_img)
+            # det_labels = indexes % self.num_classes
+            # bbox_index = indexes // self.num_classes
             # case: single class per query
-            # scores_per_query, labels_per_query = cls_score.max(dim=-1)
-            # scores, bbox_index = scores_per_query.topk(max_per_img)
-            # det_labels = labels_per_query[bbox_index]
+            scores_per_query, labels_per_query = cls_score.max(dim=-1)
+            scores, bbox_index = scores_per_query.topk(max_per_img)
+            det_labels = labels_per_query[bbox_index]
             # for both cases, bbox_pred is indexed by bbox_index
             bbox_pred = bbox_pred[bbox_index]
         else:
