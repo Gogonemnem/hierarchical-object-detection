@@ -178,6 +178,10 @@ class EmbeddingDINOHead(DINOHead):
             scores, indexes = cls_score.view(-1).topk(max_per_img)
             det_labels = indexes % self.num_classes
             bbox_index = indexes // self.num_classes
+            # single class per query case
+            # scores_per_query, labels_per_query = cls_score.max(dim=-1)
+            # scores, bbox_index = scores_per_query.topk(max_per_img)
+            # det_labels = labels_per_query[bbox_index]
             bbox_pred = bbox_pred[bbox_index]
         else:
             scores, det_labels = F.softmax(cls_score, dim=-1)[..., :-1].max(-1)
