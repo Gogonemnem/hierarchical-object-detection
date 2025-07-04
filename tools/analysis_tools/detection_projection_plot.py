@@ -67,6 +67,8 @@ from mmengine.registry import init_default_scope
 from mmdet.registry import DATASETS
 from mmdet.utils import replace_cfg_vals, update_data_root
 from hod.utils.tree import HierarchyNode, HierarchyTree
+from mmcv.ops import nms
+from mmdet.evaluation import bbox_overlaps
 try:
     import scipy.spatial
     SCIPY_AVAILABLE = True
@@ -104,7 +106,7 @@ class VisualizationConfig:
     # Core parameters
     target_examples: int = 20
     batch_size: int = 50
-    max_batches: int = 30
+    max_batches: int = 5
     min_score: float = 0.25
     iou_threshold: float = 0.5
     random_state: int = 42
@@ -846,10 +848,10 @@ class DiversityChecker:
             
             # Analyze coverage
             sufficient_levels = sum(1 for count in level_counts if count >= min_per_level)
-            all_levels_covered = sufficient_levels == 6
+            all_levels_covered = sufficient_levels == 7
             
             # Report detailed status
-            print(f"Fallback level diversity: {sufficient_levels}/6 levels "
+            print(f"Fallback level diversity: {sufficient_levels}/7 levels "
                   f"with {min_per_level}+ examples")
             
             for name, count in zip(self.level_names, level_counts):
@@ -879,7 +881,7 @@ class DiversityChecker:
         Returns:
             List[int]: Count of examples for each of the 6 fallback levels
         """
-        level_counts = [0] * 6
+        level_counts = [0] * 7
         processed_count = 0
         error_count = 0
         
@@ -888,27 +890,19 @@ class DiversityChecker:
                 result = result_data.get('result')
                 gt_instances = result_data.get('gt_instances', [])
                 
-                if not result or not hasattr(result, 'pred_instances'):
+                if not result or not hasattr(result, 'pred_instances') or not gt_instances:
                     continue
                     
                 pred_instances = result.pred_instances
                 
-                # Extract prediction data safely
-                pred_scores = pred_instances.scores.cpu().numpy()
-                pred_labels = pred_instances.labels.cpu().numpy()
-                pred_bboxes = pred_instances.bboxes.cpu().numpy()
-                
-                # Process high-confidence detections
-                for bbox, score, pred_label in zip(pred_bboxes, pred_scores, pred_labels):
-                    if score < min_score:
-                        continue
-                    
-                    # Determine fallback level for this detection
-                    fallback_level = self._get_fallback_level_for_detection(
-                        bbox, pred_label, gt_instances, iou_threshold
-                    )
-                    
-                    if fallback_level is not None and 0 <= fallback_level < 6:
+                # Use the new non-greedy matching algorithm
+                matched_pairs = non_greedy_hierarchical_matching(
+                    pred_instances, gt_instances, self.hierarchy, self.labels, min_score, iou_threshold
+                )
+
+                for pair in matched_pairs:
+                    fallback_level = pair.get('fallback_level')
+                    if fallback_level is not None and 0 <= fallback_level < 7:
                         level_counts[fallback_level] += 1
                         
                 processed_count += 1
@@ -923,88 +917,163 @@ class DiversityChecker:
             print(f"Warning: {error_count} total errors during diversity checking")
             
         return level_counts
-    
-    def _get_fallback_level_for_detection(self, bbox: np.ndarray, pred_label: int,
-                                        gt_instances: List[Dict], iou_threshold: float) -> Optional[int]:
-        """
-        Get fallback level for a single detection with robust matching.
-        
-        Matches detection to ground truth and determines hierarchical relationship
-        between predicted and actual classes.
-        
-        Args:
-            bbox: Predicted bounding box [x1, y1, x2, y2]
-            pred_label: Predicted class index
-            gt_instances: Ground truth instances for the image
-            iou_threshold: IoU threshold for matching
-            
-        Returns:
-            Optional[int]: Fallback level (0-5) if valid match found, None otherwise
-        """
-        # Find best matching ground truth
-        gt_leaf = None
-        best_iou = 0.0
-        
-        for gt_inst in gt_instances:
-            try:
-                gt_bbox = gt_inst['bbox']
-                iou = bbox_iou(bbox, gt_bbox)
-                
-                if iou > iou_threshold and iou > best_iou:
-                    gt_label = gt_inst['bbox_label']
-                    if 0 <= gt_label < len(self.labels):
-                        gt_leaf = self.labels[gt_label]
-                        best_iou = iou
-                        
-            except (KeyError, IndexError, TypeError) as e:
-                continue
-        
-        if gt_leaf is None:
-            return None
-            
-        # Validate predicted class
-        if not (0 <= pred_label < len(self.labels)):
-            return None
-            
-        pred_node = self.labels[pred_label]
-        
-        # Determine hierarchical relationship
-        try:
-            return determine_fallback_level(gt_leaf, pred_node, self.hierarchy)
-        except Exception as e:
-            print(f"Error determining fallback level for {gt_leaf} -> {pred_node}: {e}")
-            return None
 
+# =============================================================================
+# HIERARCHICAL MATCHING ALGORITHM (NON-GREEDY WITH STEALING)
+# =============================================================================
 
-def bbox_iou(box1: np.ndarray, box2: np.ndarray) -> float:
-    """
-    Calculate IoU (Intersection over Union) between two bounding boxes.
-    
-    Args:
-        box1: First bounding box [x1, y1, x2, y2]
-        box2: Second bounding box [x1, y1, x2, y2]
-        
-    Returns:
-        float: IoU value between 0 and 1
-    """
-    # Calculate intersection coordinates
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-    
-    # Check if there's no intersection
-    if x2 <= x1 or y2 <= y1:
+def hierarchical_prf_metric(
+    path_lookup: dict,
+    dt_label: str,
+    gt_label: str
+) -> float:
+    """Compute hierarchical F1 score between predicted and GT labels."""
+    dt_path = path_lookup.get(dt_label, set())
+    gt_path = path_lookup.get(gt_label, set())
+
+    len_dt_path = len(dt_path)
+    len_gt_path = len(gt_path)
+
+    if len_dt_path == 0 or len_gt_path == 0:
         return 0.0
     
-    # Calculate areas
-    intersection = (x2 - x1) * (y2 - y1)
-    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union = area1 + area2 - intersection
+    overlap = dt_path & gt_path
+    len_overlap = len(overlap)
+    hprecision = len_overlap / len_dt_path
+    hrecall = len_overlap / len_gt_path
     
-    return intersection / union if union > 0 else 0.0
+    if hprecision + hrecall == 0:
+        return 0.0
+    
+    return 2 * (hprecision * hrecall) / (hprecision + hrecall)
 
+
+def non_greedy_hierarchical_matching(
+    pred_instances, 
+    gt_instances: List[Dict], 
+    hierarchy: HierarchyTree, 
+    labels: List[str], 
+    min_score: float, 
+    iou_threshold: float
+) -> List[Dict[str, Any]]:
+    """
+    Performs non-greedy hierarchical matching with stealing to find the best
+    pairing between predictions and ground truth.
+
+    Args:
+        pred_instances: Model prediction instances.
+        gt_instances: Ground truth instances for the image.
+        hierarchy: The HierarchyTree object.
+        labels: List of all class names.
+        min_score: Score threshold to filter predictions.
+        iou_threshold: IoU threshold for considering a match.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a matched
+        prediction-GT pair with detailed information.
+    """
+    if not gt_instances or not hasattr(pred_instances, 'scores'):
+        return []
+
+    # --- 1. Data Preparation ---
+    gt_bboxes = np.array([gt['bbox'] for gt in gt_instances])
+    gt_labels_idx = np.array([gt['bbox_label'] for gt in gt_instances])
+
+    score_mask = pred_instances.scores.cpu().numpy() >= min_score
+    if not np.any(score_mask):
+        return []
+
+    det_scores = pred_instances.scores.cpu().numpy()[score_mask]
+    det_bboxes = pred_instances.bboxes.cpu().numpy()[score_mask]
+    det_labels_idx = pred_instances.labels.cpu().numpy()[score_mask]
+    
+    # Include query embeddings if they exist
+    det_embeddings = None
+    if hasattr(pred_instances, 'query_embeddings'):
+        det_embeddings = pred_instances.query_embeddings.cpu().numpy()[score_mask]
+
+    # Sort detections by score for processing order
+    sort_inds = np.argsort(-det_scores)
+    det_scores = det_scores[sort_inds]
+    det_bboxes = det_bboxes[sort_inds]
+    det_labels_idx = det_labels_idx[sort_inds]
+    if det_embeddings is not None:
+        det_embeddings = det_embeddings[sort_inds]
+
+    D = len(det_labels_idx)
+    G = len(gt_labels_idx)
+    if D == 0 or G == 0:
+        return []
+
+    # --- 2. Pre-computation for Efficiency ---
+    path_lookup = {name: set(hierarchy.get_path(name)) for name in hierarchy.class_to_node}
+    ious = bbox_overlaps(det_bboxes, gt_bboxes)
+
+    # --- 3. Non-Greedy Matching with Stealing ---
+    gtm_idx = -np.ones(G, dtype=int)  # Matched detection index for each GT
+    gt_hf1 = np.zeros(G)             # hF1 score for the current match of each GT
+    d_matched = np.zeros(D, dtype=bool)
+    detections_to_process = list(range(D))
+
+    while detections_to_process:
+        dind = detections_to_process.pop(0)
+        d_label_name = labels[det_labels_idx[dind]]
+
+        valid_gt_mask = ious[dind, :] >= iou_threshold
+        if not np.any(valid_gt_mask):
+            continue
+
+        best_boost = 1e-9
+        best_gt_match_idx = -1
+        best_iou = -1.0
+
+        for gind in np.where(valid_gt_mask)[0]:
+            gt_label_name = labels[gt_labels_idx[gind]]
+            potential_hf1 = hierarchical_prf_metric(path_lookup, d_label_name, gt_label_name)
+            
+            boost = potential_hf1 - gt_hf1[gind]
+
+            if boost > best_boost or (boost == best_boost and ious[dind, gind] > best_iou):
+                best_boost = boost
+                best_gt_match_idx = gind
+                best_iou = ious[dind, gind]
+
+        if best_gt_match_idx != -1:
+            prev_d_idx = gtm_idx[best_gt_match_idx]
+            if prev_d_idx != -1:
+                d_matched[int(prev_d_idx)] = False
+                detections_to_process.insert(0, int(prev_d_idx))
+
+            gtm_idx[best_gt_match_idx] = dind
+            gt_hf1[best_gt_match_idx] = best_boost + gt_hf1[best_gt_match_idx]
+            d_matched[dind] = True
+
+    # --- 4. Compile Results ---
+    matched_examples = []
+    for gind, dind in enumerate(gtm_idx):
+        if dind == -1:
+            continue
+        
+        dind = int(dind)
+        gt_label_name = labels[gt_labels_idx[gind]]
+        pred_label_name = labels[det_labels_idx[dind]]
+        fallback_level = determine_fallback_level(gt_label_name, pred_label_name, hierarchy)
+
+        example = {
+            'gt_label': gt_label_name,
+            'pred_label': pred_label_name,
+            'pred_label_idx': det_labels_idx[dind],
+            'confidence': det_scores[dind],
+            'fallback_level': fallback_level,
+            'bbox': det_bboxes[dind],
+            'iou': ious[dind, gind],
+        }
+        if det_embeddings is not None:
+            example['query_embedding'] = det_embeddings[dind]
+        
+        matched_examples.append(example)
+        
+    return matched_examples
 
 # -----------------------------------------------------------------------------
 # Fallback Level Logic (from hierarchical_prediction_distribution.py)
@@ -1029,11 +1098,12 @@ def determine_fallback_level(gt_leaf: str, pred_node: str, tree: HierarchyTree) 
             2 = Grandparent match (two levels up)
             3 = Sibling match (same parent)
             4 = Cousin match (same grandparent)
-            5 = Off-branch (no hierarchical relationship)
+            5 = Other Ancestor match (more than two levels up)
+            6 = Off-branch (no hierarchical relationship)
     """
     # Early exit for missing classes
     if gt_leaf not in tree.class_to_node or pred_node not in tree.class_to_node:
-        return 5  # off-branch
+        return 6  # off-branch
     
     # Exact match check
     if gt_leaf == pred_node:
@@ -1060,8 +1130,13 @@ def determine_fallback_level(gt_leaf: str, pred_node: str, tree: HierarchyTree) 
     if pred_node in cousins:
         return 4
     
+    # Check for any other ancestor relationship
+    ancestors = tree.get_ancestors(gt_leaf)
+    if pred_node in ancestors:
+        return 5 # Other Ancestor
+
     # No hierarchical relationship found
-    return 5
+    return 6
 
 
 def get_fallback_visual_encoding(level: int) -> Dict[str, Any]:
@@ -1109,7 +1184,12 @@ def get_fallback_visual_encoding(level: int) -> Dict[str, Any]:
             'linestyle': '-',
             'linewidth': 4
         },
-        5: {  # Off-branch - Red (worst)
+        5: {  # Ancestor match - Orange (very poor)
+            'color': '#F57C00',      # Orange
+            'linestyle': '-',
+            'linewidth': 4
+        },
+        6: {  # Off-branch - Red (worst)
             'color': '#D32F2F',      # Red
             'linestyle': '-',
             'linewidth': 4
@@ -1117,7 +1197,7 @@ def get_fallback_visual_encoding(level: int) -> Dict[str, Any]:
     }
     
     # Return encoding for level, defaulting to off-branch for invalid levels
-    return visual_encodings.get(level, visual_encodings[5])
+    return visual_encodings.get(level, visual_encodings[6])
 
 
 def _select_balanced_subset(
@@ -1131,29 +1211,29 @@ def _select_balanced_subset(
         return []
 
     # Ensure all source examples have a valid fallback_level
-    valid_source_examples = [ex for ex in source_examples if 'fallback_level' in ex and 0 <= ex['fallback_level'] < 6]
+    valid_source_examples = [ex for ex in source_examples if 'fallback_level' in ex and 0 <= ex['fallback_level'] < 7]
     if not valid_source_examples:
         # If no valid examples, return a simple slice of the original if desperate, or empty
         return source_examples[:num_to_select] if source_examples else []
 
-    examples_by_level = {level: [] for level in range(6)}
+    examples_by_level = {level: [] for level in range(7)}
     for ex in valid_source_examples:
         examples_by_level[ex['fallback_level']].append(ex)
 
     # Sort examples within each level by confidence (descending) if available
-    for level in range(6):
+    for level in range(7):
         if examples_by_level[level]:
             examples_by_level[level].sort(key=lambda x: x.get('confidence', 0.0), reverse=True)
 
     selected_examples: List[Dict[str, Any]] = []
     # Keeps track of how many we've taken from each level's sorted list
-    num_taken_from_level = [0] * 6 
+    num_taken_from_level = [0] * 7 
 
     # First pass: Try to get a proportional number from each level
-    # Target at least 1 per level if num_to_select allows, or num_to_select // 6
-    target_per_level_first_pass = max(1, num_to_select // 6 if num_to_select >= 6 else 1)
+    # Target at least 1 per level if num_to_select allows, or num_to_select // 7
+    target_per_level_first_pass = max(1, num_to_select // 7 if num_to_select >= 7 else 1)
 
-    for level in range(6):
+    for level in range(7):
         if len(selected_examples) >= num_to_select:
             break 
 
@@ -1174,7 +1254,7 @@ def _select_balanced_subset(
     # This loop continues as long as we need more examples and can still add them.
     while len(selected_examples) < num_to_select:
         added_in_this_cycle = False
-        for level in range(6): # Cycle through levels
+        for level in range(7): # Cycle through levels
             if len(selected_examples) >= num_to_select:
                 break # Stop if we've filled up
 
@@ -2129,26 +2209,26 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     print("=" * 50)
 
     # Extract examples using the collected embeddings
-    examples_by_level = {level: [] for level in range(6)}
+    examples_by_level = {level: [] for level in range(7)}
     
     for result_data in results_with_embeddings:
         img_path = result_data['image_path']
-        result = result_data['result']
-        gt_instances = result_data['gt_instances']
+        result = result_data.get('result')
+        gt_instances = result_data.get('gt_instances', [])
         
-        # Get predictions from DetDataSample
-        pred_instances = result.pred_instances
-        pred_bboxes = pred_instances.bboxes.cpu().numpy()
-        pred_scores = pred_instances.scores.cpu().numpy()
-        pred_labels = pred_instances.labels.cpu().numpy()
-        
-        # Get actual query embeddings (this is the key improvement!)
-        query_embeddings = None
-        if hasattr(pred_instances, 'query_embeddings'):
-            query_embeddings = pred_instances.query_embeddings.numpy()
-        else:
+        if not result or not hasattr(result, 'pred_instances') or not gt_instances:
             continue
             
+        pred_instances = result.pred_instances
+
+        # Use the new non-greedy matching algorithm to get matched pairs
+        matched_pairs = non_greedy_hierarchical_matching(
+            pred_instances, gt_instances, hierarchy, labels, min_score, iou_threshold
+        )
+
+        if not matched_pairs:
+            continue
+
         # Load image for crop extraction
         try:
             img = cv2.imread(img_path)
@@ -2158,33 +2238,14 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
         except (cv2.error, Exception):
             continue
 
-        # Process high-confidence predictions
-        for i, (bbox, score, pred_label) in enumerate(zip(pred_bboxes, pred_scores, pred_labels)):
-            if score < min_score:
+        # Process the matched pairs
+        for pair in matched_pairs:
+            fallback_level = pair.get('fallback_level')
+            if fallback_level is None:
                 continue
-                
-            # Find matching ground truth (if any)
-            gt_leaf = None
-            for gt_inst in gt_instances:
-                gt_bbox = gt_inst['bbox']
-                if bbox_iou(bbox, gt_bbox) > iou_threshold:
-                    if gt_inst['bbox_label'] < len(labels):
-                        gt_leaf = labels[gt_inst['bbox_label']]
-                    break
-            
-            if gt_leaf is None:
-                continue
-                
-            # Get predicted class name
-            if pred_label < len(labels):
-                pred_node = labels[pred_label]
-            else:
-                continue
-                
-            # Determine fallback level
-            fallback_level = determine_fallback_level(gt_leaf, pred_node, hierarchy)
-            
+
             # Extract crop
+            bbox = pair['bbox']
             x1, y1, x2, y2 = bbox.astype(int)
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(img_rgb.shape[1], x2), min(img_rgb.shape[0], y2)
@@ -2196,35 +2257,36 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
             crop_size = 96
             crop_resized = cv2.resize(crop, (crop_size, crop_size))
             
-            # Use actual query embedding (this is the key scientific improvement!)
-            if i < len(query_embeddings):
-                feature_vector = query_embeddings[i]
+            # Use actual query embedding from the matched pair
+            if 'query_embedding' in pair:
+                feature_vector = pair['query_embedding']
                 
+                # Append all relevant info from the matched pair
                 examples_by_level[fallback_level].append({
                     'crop_image': crop_resized,
-                    'feature_vector': feature_vector,  # ACTUAL query embedding from model
-                    'gt_leaf': gt_leaf,
-                    'pred_node': pred_node,             # Class name (string)
-                    'pred_label': pred_label,           # Class index (int)
+                    'feature_vector': feature_vector,
+                    'gt_leaf': pair['gt_label'],
+                    'pred_node': pair['pred_label'],
+                    'pred_label': pair['pred_label_idx'], # Keep original key for compatibility
                     'fallback_level': fallback_level,
-                    'confidence': score,
+                    'confidence': pair['confidence'],
                     'bbox': bbox,
                     'image_path': img_path
                 })
-    
+
     # Improved balanced sampling across fallback levels
     examples = []
-    examples_per_level = max(1, num_examples // 6)  # Base allocation per level
-    fallback_names = ['Leaf Correct', 'Parent', 'Grandparent', 'Sibling', 'Cousin', 'Off-branch']
+    examples_per_level = max(1, num_examples // 7)  # Base allocation per level
+    fallback_names = ['Leaf Correct', 'Parent', 'Grandparent', 'Sibling', 'Cousin', 'Ancestor', 'Off-branch']
     
     # Sort examples within each level by confidence
-    for level in range(6):
+    for level in range(7):
         if examples_by_level[level]:
             examples_by_level[level].sort(key=lambda x: x['confidence'], reverse=True)
     
     # First pass: allocate base number per level
-    level_counts = [0] * 6
-    for level in range(6):
+    level_counts = [0] * 7
+    for level in range(7):
         level_examples = examples_by_level[level]
         if level_examples:
             take_count = min(examples_per_level, len(level_examples))
@@ -2243,7 +2305,7 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
         rounds += 1
         
         # Try to add one more to each level that has available examples
-        for level in range(6):
+        for level in range(7):
             if remaining_slots <= 0:
                 break
                 
@@ -2263,14 +2325,14 @@ def extract_detection_examples_with_hooks(model, dataset, prototype_embeddings,
     print(f"Final: {len(examples)} examples selected")
     
     # Show the final level breakdown
-    final_counts = [0] * 6
+    final_counts = [0] * 7
     for ex in examples:
         final_counts[ex['fallback_level']] += 1
     
-    for level in range(6):
+    for level in range(7):
         if final_counts[level] > 0:
             print(f"  {fallback_names[level]}: {final_counts[level]} examples")
-    
+
     # Ensure we return exactly the requested number
     return examples[:num_examples]
 
@@ -2415,7 +2477,7 @@ def overlay_detection_thumbnails(ax: Axes, examples: List[Dict], disable_layout_
         pred_node_display = pred_node[:10] + "..." if len(pred_node) > 12 else pred_node
         
         # Get fallback name
-        fallback_names = ['Exact Match', 'Parent', 'Grandparent', 'Sibling', 'Cousin', 'Off-branch']
+        fallback_names = ['Exact Match', 'Parent', 'Grandparent', 'Sibling', 'Cousin', 'Ancestor', 'Off-branch']
         fallback_name = fallback_names[fallback_level]
         
         # Create label format based on fallback level for cleaner display
@@ -2512,13 +2574,15 @@ def add_detection_border_legend(ax: Axes):
     
     # Legend data with improved labels that better explain the hierarchical relationships
     legend_items = [
-        (0, 'Exact Match (correct prediction)', '#2E8B57'),       # SeaGreen 
-        (1, 'Parent (prediction too general)', '#66CDAA'),        # MediumAquamarine
-        (2, 'Grandparent (prediction very general)', '#90EE90'),  # LightGreen
-        (3, 'Sibling (same parent class)', '#87CEEB'),            # SkyBlue
-        (4, 'Cousin (related class)', '#DDA0DD'),                 # Plum
-        (5, 'Off-branch (unrelated class)', '#DC143C')            # Crimson
+        (0, 'Exact Match (correct prediction)', '#1B5E20'),      # Dark Green
+        (1, 'Parent (prediction too general)', '#388E3C'),       # Medium Green
+        (2, 'Grandparent (prediction very general)', '#66BB6A'), # Light Green
+        (3, 'Sibling (same parent class)', '#1976D2'),           # Blue
+        (4, 'Cousin (related class)', '#7B1FA2'),                # Purple
+        (5, 'Ancestor (related, more distant)', '#F57C00'),      # Orange
+        (6, 'Off-branch (unrelated class)', '#D32F2F')           # Red
     ]
+    legend_items.reverse()
     
     # Create legend elements with better styling - boxes with colored borders
     legend_elements = []
@@ -2531,8 +2595,8 @@ def add_detection_border_legend(ax: Axes):
     # Add legend with improved styling and positioning
     legend = ax.legend([elem[0] for elem in legend_elements], 
                       [elem[1] for elem in legend_elements],
-                      loc='upper left', bbox_to_anchor=(0.01, 0.99), 
-                      fontsize=9, title="GT-Prediction Relationships", title_fontsize=11,
+                      loc='upper right', bbox_to_anchor=(0.99, 0.99), 
+                      fontsize=10, title="GT-Prediction Relationships", title_fontsize=11,
                       frameon=True, fancybox=True, shadow=True, framealpha=0.95,
                       ncol=1)  # Single column for better readability
     
@@ -2664,8 +2728,8 @@ def plot_prototype_scatter(ax: Axes,
                           filtered_labels: List[str],
                           viz_manager: Optional['VisualizationManager'] = None):
     """
-    Plot UMAP scatter points with publication-quality styling and improved readability.
-    Attempts to label all nodes.
+    Plot UMAP scatter points with adaptive labeling to reduce clutter.
+    Prioritizes labeling parent nodes and only shows leaf labels if space permits.
     
     Args:
         ax: Matplotlib axes to plot on
@@ -2694,38 +2758,38 @@ def plot_prototype_scatter(ax: Axes,
     )
 
     texts = []
-    # Iterate through ALL filtered_labels to create text objects
-    # No explicit limit on the number of labels here.
-    for i in range(len(filtered_labels)):
-        if i < len(filtered_coords): # Ensure coordinate exists for the label
-            (x, y) = filtered_coords[i]
-            lbl = filtered_labels[i]
-            
-            # Consistent font size for potentially many labels
-            font_size = 7.5 
-            
-            texts.append(ax.text(
-                x, y, lbl,
-                fontsize=font_size, 
-                color='#333333', 
-                fontweight='normal',
-                zorder=7 # Labels above prototype markers
-            ))
     
+    # --- Adaptive Labeling Logic ---
+    # Prioritize labels for larger markers (parents) and then add smaller ones if they don't collide
+    label_data = sorted(zip(marker_sizes, filtered_labels, filtered_coords), key=lambda x: x[0], reverse=True)
+    
+    # Use a smaller font for less important (leaf) nodes
+    base_fontsize = 9
+    min_fontsize = 7.5
+    
+    for size, label, (x, y) in label_data:
+        # Determine font size based on marker size (hierarchical importance)
+        # Nodes with larger markers (parents) get a slightly larger font.
+        is_parent_node = size > np.percentile(marker_sizes, 50)
+        fontsize = base_fontsize if is_parent_node else min_fontsize
+        
+        # Abbreviate long labels to prevent clutter
+        display_label = (label[:15] + '..') if len(label) > 17 else label
+        
+        texts.append(ax.text(x, y, display_label, fontsize=fontsize, ha='center', va='center',
+                             color='black', zorder=12,
+                             path_effects=[path_effects.withStroke(linewidth=2, foreground='white', alpha=0.7)]))
+
     if texts:
         try:
-            # adjust_text will try to prevent overlaps for all generated texts
-            adjust_text(
-                texts,
-                ax=ax,
-                expand_points=(1.1, 1.1), 
-                expand_text=(1.1, 1.1),
-                force_points=0.15, 
-                force_text=0.25,
-                lim=400 # Max iterations for adjust_text
-            )
+            # adjust_text is crucial for preventing label overlap
+            adjust_text(texts, ax=ax,
+                        arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.6),
+                        force_points=(0.1, 0.2),
+                        force_text=(0.2, 0.4))
+            print(f"Successfully positioned {len(texts)} labels using adjust_text.")
         except Exception as e:
-            print(f"Could not adjust text labels: {e}")
+            print(f"Warning: adjust_text failed, labels may overlap. Error: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -2897,34 +2961,57 @@ def _plot_panel3_subtree_zoom(
     projection_name: str,
     focus_node_name: Optional[str]
 ):
-    """Populates Panel 3 with the focused subtree visualization."""
+    """Populates Panel 3 with a focused view on a subtree and its related errors."""
     print(f"Populating Panel 3: Subtree Zoom (Focus: {focus_node_name})")
     panel3_title = "" # Default title
 
     if focus_node_name and hierarchy.class_to_node.get(focus_node_name):
         focus_node_obj = hierarchy.class_to_node.get(focus_node_name)
-        # Get descendants, ensure focus node itself is included if it's a leaf or desired
+        # Get descendants and include the focus node itself
         subtree_node_names = set(focus_node_obj.descendants())
-        if focus_node_name not in subtree_node_names: # Ensure focus node is part of its own "subtree"
-             subtree_node_names.add(focus_node_name)
+        subtree_node_names.add(focus_node_name)
 
-        # Filter prototype coordinates for the subtree
+        # --- NEW: Identify cross-subtree mistakes and related nodes ---
+        cross_subtree_mistakes = []
+        mistake_related_nodes = set()
+        examples_within_subtree = []
+
+        for ex in processed_all_detection_examples:
+            gt_leaf = ex.get('gt_leaf')
+            pred_node = ex.get('pred_node')
+            if not gt_leaf or not pred_node:
+                continue
+
+            if gt_leaf in subtree_node_names:
+                if pred_node not in subtree_node_names:
+                    # This is a cross-subtree mistake
+                    cross_subtree_mistakes.append(ex)
+                    # Add the incorrect prediction and its ancestors to the plot
+                    mistake_related_nodes.add(pred_node)
+                    ancestors = hierarchy.get_path(pred_node)
+                    mistake_related_nodes.update(ancestors)
+                else:
+                    # GT and Pred are both inside the subtree
+                    examples_within_subtree.append(ex)
+        
+        print(f"Found {len(cross_subtree_mistakes)} cross-subtree mistakes for focus '{focus_node_name}'.")
+
+        # Combine nodes from the focus subtree and mistake-related nodes
+        plotted_nodes_p3 = subtree_node_names.union(mistake_related_nodes)
+        
+        # Combine examples for display and select a balanced subset
+        combined_examples_for_display = examples_within_subtree + cross_subtree_mistakes
+        sub_detection_examples_for_p3_display = _select_balanced_subset(
+            combined_examples_for_display, num_examples_display_p1p3
+        )
+
+        # Filter prototype coordinates for all nodes to be plotted
         sub_proj_node_coords = {
             name: coords for name, coords in full_proj_node_coords.items() 
-            if name in subtree_node_names
+            if name in plotted_nodes_p3
         }
         
-        # Filter detection examples whose predicted node is in the subtree
-        sub_detection_examples_all_in_subtree = [
-            ex for ex in processed_all_detection_examples 
-            if ex.get('pred_node') in subtree_node_names and 'umap_coords' in ex
-        ]
-        sub_detection_examples_for_p3_display = _select_balanced_subset(
-            sub_detection_examples_all_in_subtree, num_examples_display_p1p3
-        )
-        
-        plotted_nodes_p3 = set(sub_proj_node_coords.keys())
-        panel3_title = f"Panel 3: Subtree '{focus_node_name}'"
+        panel3_title = f"Panel 3: Subtree '{focus_node_name}' & Related Errors"
         
         if plotted_nodes_p3:
             # Pass full_proj_labels, calculate_visual_attributes will filter internally
@@ -2952,10 +3039,10 @@ def _plot_panel3_subtree_zoom(
                 ax.text(0.5, 0.5, f"No prototype data for subtree '{focus_node_name}'", ha='center', va='center')
 
             if sub_detection_examples_for_p3_display:
-                print(f"Panel 3: Displaying {len(sub_detection_examples_for_p3_display)} balanced example thumbnails for subtree.")
-                p3_display_counts = [0]*6
+                print(f"Panel 3: Displaying {len(sub_detection_examples_for_p3_display)} balanced example thumbnails for subtree and its errors.")
+                p3_display_counts = [0]*7
                 for ex_p3 in sub_detection_examples_for_p3_display: 
-                    if 'fallback_level' in ex_p3 and 0 <= ex_p3['fallback_level'] < 6:
+                    if 'fallback_level' in ex_p3 and 0 <= ex_p3['fallback_level'] < 7:
                          p3_display_counts[ex_p3['fallback_level']] +=1
                 print(f"  Panel 3 display distribution: {p3_display_counts}")
                 overlay_detection_thumbnails(ax, sub_detection_examples_for_p3_display, disable_layout_adjustment=False)
@@ -2966,10 +3053,8 @@ def _plot_panel3_subtree_zoom(
     elif focus_node_name: # Node name given but not found in hierarchy
         ax.text(0.5, 0.5, f"Focus node '{focus_node_name}' not found in hierarchy.", ha='center', va='center', fontsize=12, color='red')
         panel3_title = "Panel 3: Invalid Focus Node"
-    else: # No focus node provided
-        ax.text(0.5, 0.5, "Panel 3: No focus node selected", ha='center', va='center', fontsize=12, color='gray')
-        panel3_title = "Panel 3: Subtree Zoom (Select Node)"
 
+    add_detection_border_legend(ax)
     _style_panel_axes(ax, panel3_title, projection_name)
 
 
@@ -3045,21 +3130,21 @@ def generate_detection_projection_plot(
         if save_path and separate_panels: # If separate, maybe indicate no data for each panel
              base_s, ext_s = os.path.splitext(save_path)
              for i in range(1,4):
-                 fig_empty, ax_empty = plt.subplots(1, 1, figsize=(12,12))
+                 fig_empty, ax_empty = plt.subplots(1, 1, figsize=(6,6))
                  ax_empty.text(0.5, 0.5, f"No data for Panel {i}", ha='center', va='center')
                  empty_path = f"{base_s}_panel{i}_nodata{ext_s}"
                  fig_empty.savefig(empty_path)
                  plt.close(fig_empty)
                  print(f"Empty plot placeholder saved to {empty_path}")
         elif save_path: # Combined empty plot
-             fig_empty, ax_empty = plt.subplots(1, 1, figsize=(12,12))
+             fig_empty, ax_empty = plt.subplots(1, 1, figsize=(6,6))
              ax_empty.text(0.5, 0.5, "No data to plot.", ha='center', va='center')
              empty_path = f"{save_path}_nodata.png" # Ensure different name
              fig_empty.savefig(empty_path)
              plt.close(fig_empty)
              print(f"Empty plot placeholder saved to {empty_path}")
         else:
-            plt.figure(figsize=(12,12))
+            plt.figure(figsize=(6,6))
             plt.text(0.5,0.5, "No data to plot", ha='center', va='center')
             plt.show()
         return
@@ -3239,8 +3324,8 @@ def generate_detection_projection_plot(
 def parse_args():
     parser = argparse.ArgumentParser(description='Create combined UMAP visualization with detection examples using forward hooks')
     parser.add_argument('config', help='Path to model config file')
+    parser.add_argument('model_path', help='Path to trained model checkpoint')
     parser.add_argument('save_dir', help='Directory where the figure will be saved')
-    parser.add_argument('--model-path', required=True, help='Path to trained model checkpoint')
     parser.add_argument('--save-name', default='combined_umap_visualization.png', 
                        help='Name of the saved figure (default: combined_umap_visualization.png)')
     parser.add_argument('--num-examples-display', type=int, default=20, 

@@ -1,3 +1,4 @@
+from typing import Optional
 import argparse
 import os
 import textwrap
@@ -9,7 +10,7 @@ from mmcv.ops import nms
 from mmengine import Config, DictAction
 from mmengine.fileio import load
 from mmengine.registry import init_default_scope
-from mmengine.utils import ProgressBar
+from tqdm import tqdm
 
 from mmdet.evaluation import bbox_overlaps
 from mmdet.registry import DATASETS
@@ -57,238 +58,244 @@ def parse_args():
         'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
+    parser.add_argument(
+        '--paper-size',
+        action='store_true',
+        help='Whether to use paper-sized plots. Defaults to False.'
+    )
     args = parser.parse_args()
     return args
 
 
-def flatten_taxonomy_with_paths(taxonomy_tree):
-    """
-    Flatten a taxonomy dictionary using HierarchyTree.
-    Returns a list of tuples: (leaf_name_str, full_path_list_of_names_from_root_to_parent)
-    Example: [("F-16", ["Military Aircraft", "Fixed-Wing", "Fighters"])]
-    """
-    flat_list = []
+class HierarchyCache:
+    """Pre-computed hierarchy information cache for efficient lookups."""
     
-    # Assuming tree.get_leaf_nodes() returns a list of HierarchyNode objects
-    # Each node object should have a .name attribute (string)
-    leaf_node_objects = taxonomy_tree.get_leaf_nodes()
+    def __init__(self, taxonomy_tree):
+        self.tree = taxonomy_tree
+        self._build_cache()
     
-    if not leaf_node_objects:
-        return []
-    
-    # Sort node objects by their name attribute for consistent order
-    # Assuming node_obj.name exists and is a string
-    try:
-        sorted_leaf_node_objects = sorted(leaf_node_objects, key=lambda node: node.name)
-    except AttributeError:
-        # Fallback if .name attribute is missing, try direct sort (might fail or be unsorted if complex objects)
-        # Or if get_leaf_nodes() actually returns strings (error message suggested otherwise)
-        sorted_leaf_node_objects = sorted(leaf_node_objects) 
-
-    for node_obj in sorted_leaf_node_objects:
-        leaf_name_str = ""
-        if hasattr(node_obj, 'name'):
-            leaf_name_str = str(node_obj.name) # Extract string name
-        else:
-            leaf_name_str = str(node_obj) # Assume node_obj is already a name or string-convertible
+    def _build_cache(self):
+        """Build all necessary caches in one pass through the tree."""
+        # Core mappings
+        self.node_to_depth = {}
+        self.node_to_ancestors = {}
+        self.depth_to_nodes = {}
+        self.node_to_level_ancestor = {}
         
-        # tree.get_ancestors(str_name) returns a list of ancestor name strings,
-        # from immediate parent up to the root.
-        ancestor_names_parent_to_root = taxonomy_tree.get_ancestors(leaf_name_str) 
-        
-        path_names_root_to_parent = []
-        if ancestor_names_parent_to_root:
-            path_names_root_to_parent = [str(name) for name in reversed(ancestor_names_parent_to_root)]
-        
-        flat_list.append((leaf_name_str, path_names_root_to_parent))
-    return flat_list
-
-
-def build_nested_boundaries(flat_tax):
-    """
-    Build group boundaries for every level in the path.
-    Returns a list of boundary specs:
-        [
-          (level_idx, group_name, start_idx, end_idx),
-          ...
-        ]
-    from outermost (level 0) to innermost (leaf parent).
-    """
-
-    # Sort flat_tax by the entire path so that siblings are adjacent
-    flat_tax_sorted = sorted(flat_tax, key=lambda x: x[1])
-
-    boundaries_per_level = []
-    max_depth = 0
-    if not flat_tax_sorted:
-        return [], []
-        
-    for _, path in flat_tax_sorted:
-        max_depth = max(max_depth, len(path))
-
-    for level in range(max_depth):
-        current_group_name = None
-        start_idx = 0
-        for idx, (leaf, path) in enumerate(flat_tax_sorted):
-            group_at_this_level = path[level] if len(path) > level else "<NoGroup>"
-
-            if current_group_name is None:
-                current_group_name = group_at_this_level
-                start_idx = idx
-            elif current_group_name != group_at_this_level:
-                boundaries_per_level.append((level, current_group_name, start_idx, idx - 1))
-                current_group_name = group_at_this_level
-                start_idx = idx
-
-        if current_group_name is not None:
-            boundaries_per_level.append((level, current_group_name, start_idx, len(flat_tax_sorted) - 1))
+        # Process all nodes in one traversal
+        def _traverse(node, depth=0, ancestors=None):
+            if ancestors is None:
+                ancestors = []
             
-    return flat_tax_sorted, boundaries_per_level
+            name = node.name
+            self.node_to_depth[name] = depth
+            self.node_to_ancestors[name] = ancestors.copy()
+            
+            # Group nodes by depth
+            if depth not in self.depth_to_nodes:
+                self.depth_to_nodes[depth] = []
+            self.depth_to_nodes[depth].append(name)
+            
+            # Pre-compute ancestor at each level
+            if name not in self.node_to_level_ancestor:
+                self.node_to_level_ancestor[name] = {}
+            
+            for level in range(depth + 1):
+                if level < len(ancestors):
+                    self.node_to_level_ancestor[name][level] = ancestors[level]
+                else:
+                    self.node_to_level_ancestor[name][level] = name
+            
+            # Recurse to children
+            new_ancestors = ancestors + [name]
+            for child in node.children:
+                _traverse(child, depth + 1, new_ancestors)
+        
+        _traverse(self.tree.root)
+        
+        # Additional optimizations
+        self.max_depth = max(self.depth_to_nodes.keys()) if self.depth_to_nodes else 0
+        self.leaf_nodes = [name for name, node in self.tree.class_to_node.items() if node.is_leaf()]
 
 
-def _get_node_group_at_agg_level(node_label: str, tree: HierarchyTree, agg_level: int) -> str:
+def get_leaf_hierarchy_paths(taxonomy_tree):
     """
-    Determines the group name for a given node label based on the aggregation level.
-
-    Args:
-        node_label: The name of the node (can be leaf or internal).
-        tree: The HierarchyTree object representing the taxonomy.
-        agg_level: The target depth for aggregation (0-indexed).
-                   Nodes at this depth will form the groups.
-
-    Returns:
-        The name of the group class.
-    """
-    if node_label not in tree.class_to_node:
-        # This should not happen if node_label comes from tree-aware processing
-        return node_label # Fallback: node is its own group
-
-    # path_ancestors is the list of ancestor names: [root, child_of_root, ..., parent_of_node]
-    path_ancestors = tree.get_ancestors(node_label)
+    Get sorted leaf nodes with their hierarchy paths.
+    Returns list of tuples: (leaf_name, path_from_root)
     
-    # node_depth is the depth of the node itself. Root is at depth 0.
-    # A node whose parent is the root has depth 1. path_ancestors = [root], len=1.
-    # A node whose grandparent is the root has depth 2. path_ancestors = [root, parent], len=2.
-    node_depth = len(path_ancestors) 
+    Optimized with hierarchy cache for efficient construction.
+    """
+    cache = HierarchyCache(taxonomy_tree)
+    
+    # Use cached data for fast construction
+    leaf_paths = []
+    for leaf_name in sorted(cache.leaf_nodes):
+        ancestors = cache.node_to_ancestors[leaf_name]
+        path_from_root = list(reversed(ancestors)) if ancestors else []
+        leaf_paths.append((leaf_name, path_from_root))
+    
+    return leaf_paths
 
-    if not path_ancestors and node_label == tree.root.name: # node_label is the root
-        return node_label
 
-    if agg_level < node_depth:
-        # The node is strictly deeper than the aggregation level.
-        # Group it by its ancestor at the specified aggregation depth.
-        # e.g., agg_level=0 means group by root (path_ancestors[0])
-        group_name = path_ancestors[agg_level]
-        return group_name
-    else: # agg_level >= node_depth
-        # The node is at or shallower than the aggregation level.
-        # It means this node should be its own distinct group at this level of detail.
+def compute_hierarchy_boundaries(sorted_items_with_paths):
+    """
+    Compute hierarchical group boundaries for visualization.
+    Returns (sorted_items, boundaries) where boundaries contain (level, group_name, start, end).
+    
+    Optimized with pre-sorted input and single-pass boundary detection.
+    """
+    if not sorted_items_with_paths:
+        return [], []
+    
+    # Sort by hierarchy path for proper grouping - single operation
+    sorted_items = sorted(sorted_items_with_paths, key=lambda x: x[1])
+    
+    # Pre-calculate maximum depth to avoid repeated computation
+    max_depth = max(len(path) for _, path in sorted_items)
+    boundaries = []
+    
+    # Process all levels in one pass for efficiency
+    for level in range(max_depth):
+        current_group = None
+        start_idx = 0
+        
+        for idx, (_, path) in enumerate(sorted_items):
+            group_at_level = path[level] if level < len(path) else None
+            
+            if current_group != group_at_level:
+                # Finalize previous group
+                if current_group is not None:
+                    boundaries.append((level, current_group, start_idx, idx - 1))
+                # Initialize new group
+                current_group = group_at_level
+                start_idx = idx
+        
+        # Finalize last group at this level
+        if current_group is not None:
+            boundaries.append((level, current_group, start_idx, len(sorted_items) - 1))
+    
+    return sorted_items, boundaries
+
+
+def get_aggregation_group_cached(node_label: str, cache: HierarchyCache, agg_level: int) -> str:
+    """
+    Fast aggregation group lookup using pre-computed cache.
+    
+    Args:
+        node_label: Node name to aggregate
+        cache: Pre-computed hierarchy cache
+        agg_level: Target aggregation depth (0-indexed)
+    
+    Returns:
+        Group name for aggregation
+    """
+    # Fast path for unknown nodes
+    if node_label not in cache.node_to_level_ancestor:
         return node_label
+    
+    # Direct lookup from cache - O(1) operation
+    return cache.node_to_level_ancestor[node_label].get(agg_level, node_label)
 
 
 def aggregate_confusion_matrix(
     original_cm: np.ndarray,
     tree: HierarchyTree,
     agg_level: int,
-    node_labels_in_cm_order: list
+    node_labels_in_cm_order: list,
+    cache: Optional[HierarchyCache] = None
 ) -> tuple:
     """
-    Aggregates a confusion matrix based on a hierarchical taxonomy.
-
+    Aggregate confusion matrix based on hierarchical taxonomy at specified level.
+    
+    Uses vectorized operations with pre-computed hierarchy cache for optimal performance.
+    
     Args:
-        original_cm: The input confusion matrix. Assumed to have classes corresponding
-                     to node_labels_in_cm_order, with the last row/col being 'background'.
-                     These can be leaf or non-leaf nodes.
-        tree: The HierarchyTree object.
-        agg_level: The target depth for aggregation (0-indexed).
-        node_labels_in_cm_order: Ordered list of node class names (leaf or non-leaf)
-                                 as they appear in the original_cm (excluding 'background').
-
+        original_cm: Input confusion matrix with background as last row/col
+        tree: Hierarchy tree
+        agg_level: Target aggregation depth (0-indexed)
+        node_labels_in_cm_order: Node class names (excluding 'background')
+        cache: Pre-computed hierarchy cache (optional, will create if None)
+    
     Returns:
-        A tuple containing:
-        - aggregated_cm (np.ndarray): The new aggregated confusion matrix.
-        - aggregated_labels (List[str]): The labels for the aggregated matrix (including 'background').
+        (aggregated_cm, aggregated_labels): Aggregated matrix and labels
     """
     num_original_nodes = len(node_labels_in_cm_order)
     if original_cm.shape != (num_original_nodes + 1, num_original_nodes + 1):
-        raise ValueError(
-            f"Original CM shape {original_cm.shape} does not match "
-            f"number of node labels {num_original_nodes} + background."
-        )
+        raise ValueError(f"Matrix shape {original_cm.shape} doesn't match {num_original_nodes} + background")
 
-    node_to_group_map = {
-        node_label: _get_node_group_at_agg_level(node_label, tree, agg_level)
-        for node_label in tree.all_classes()
-    }
-
-    # Define the labels for this level: nodes at this depth AND leaf nodes that are deeper.
-    # Leaf nodes must be preserved at all aggregation levels once they appear.
-    groups_at_this_level = []
-    seen_groups = set()
-    for leaf in node_labels_in_cm_order:
-        group = node_to_group_map.get(leaf)
-        if group and group not in seen_groups:
-            group_node = tree.class_to_node.get(group)
-            if group_node:
-                # Include groups that are exactly at this level OR leaf nodes at deeper levels
-                if (group_node.get_depth() == agg_level or group_node.is_leaf()):
-                    groups_at_this_level.append(group)
-                    seen_groups.add(group)
-
-    aggregated_labels_no_bg = groups_at_this_level
-    aggregated_labels_with_bg = aggregated_labels_no_bg + ['background']
+    # Use provided cache or create new one
+    if cache is None:
+        cache = HierarchyCache(tree)
     
-    group_to_idx_map = {name: i for i, name in enumerate(aggregated_labels_no_bg)}
-    num_aggregated_classes = len(aggregated_labels_no_bg)
-    aggregated_cm = np.zeros((num_aggregated_classes + 1, num_aggregated_classes + 1), dtype=original_cm.dtype)
-
-    # --- Main Aggregation Loop ---
-    for i, gt_node_name in enumerate(node_labels_in_cm_order):
-        gt_group = node_to_group_map.get(gt_node_name)
-        if gt_group not in group_to_idx_map:
-            continue
-        gt_idx = group_to_idx_map[gt_group]
-
-        for j, dt_node_name in enumerate(node_labels_in_cm_order):
-            # Key Filtering Logic:
-            # If a prediction is for a node at a HIGHER level (shallower depth),
-            # it should ALWAYS go to background, regardless of ancestry relationships
-            dt_node = tree.class_to_node.get(dt_node_name)
-            if dt_node.get_depth() < agg_level and not dt_node.is_leaf():
-                # All ancestor predictions which are not leaves go to background
-                dt_idx = num_aggregated_classes
-            else:
-                # Otherwise, aggregate it up to the current level normally.
-                dt_group = node_to_group_map.get(dt_node_name)
-                if dt_group not in group_to_idx_map:
-                    continue  # Skip if no group mapping exists
-                dt_idx = group_to_idx_map[dt_group]
-            
-            aggregated_cm[gt_idx, dt_idx] += original_cm[i, j]
-
-        # Handle original background predictions for the current GT group
-        aggregated_cm[gt_idx, num_aggregated_classes] += original_cm[i, num_original_nodes]
-
-    # --- Handle GT Background Row ---
-    for j, dt_node_name in enumerate(node_labels_in_cm_order):
-        dt_node = tree.class_to_node.get(dt_node_name)
-
-        # For background GT, ancestor predictions should still be mapped to background
-        # since there's no specific GT class to match against
-        if dt_node.get_depth() < agg_level and not dt_node.is_leaf():
-            new_pred_idx = num_aggregated_classes  # Remap to background
-        else:
-            dt_group = node_to_group_map.get(dt_node_name)
-            if dt_group not in group_to_idx_map:
-                continue  # Skip if no group mapping exists
-            new_pred_idx = group_to_idx_map[dt_group]
+    # Compute aggregation groups for GT and predictions
+    gt_groups = [get_aggregation_group_cached(node_label, cache, agg_level) 
+                 for node_label in node_labels_in_cm_order]
+    
+    dt_groups = []
+    for node_label in node_labels_in_cm_order:
+        node_depth = cache.node_to_depth.get(node_label, float('inf'))
         
-        aggregated_cm[num_aggregated_classes, new_pred_idx] += original_cm[num_original_nodes, j]
+        # Filter ancestor predictions to background
+        if node_depth < agg_level and not tree.class_to_node.get(node_label, tree.root).is_leaf():
+            dt_groups.append('background')
+        else:
+            dt_groups.append(get_aggregation_group_cached(node_label, cache, agg_level))
     
-    # Sum of original GT background to predicted background
-    aggregated_cm[num_aggregated_classes, num_aggregated_classes] += original_cm[num_original_nodes, num_original_nodes]
-
-    return aggregated_cm, aggregated_labels_with_bg
+    # Collect unique aggregation groups
+    unique_groups = []
+    seen = set()
+    
+    for group in gt_groups:
+        if group not in seen and group in tree.class_to_node:
+            group_node = tree.class_to_node[group]
+            if group_node.get_depth() == agg_level or (group_node.is_leaf() and group_node.get_depth() < agg_level):
+                unique_groups.append(group)
+                seen.add(group)
+    
+    # Build aggregated matrix structure
+    aggregated_labels = unique_groups + ['background']
+    group_to_idx = {name: i for i, name in enumerate(unique_groups)}
+    num_agg_classes = len(unique_groups)
+    
+    # Create index mappings for vectorized operations
+    gt_indices = np.array([group_to_idx.get(group, -1) for group in gt_groups])
+    dt_indices = np.array([
+        group_to_idx.get(group, num_agg_classes if group == 'background' else -1) 
+        for group in dt_groups
+    ])
+    
+    # Initialize aggregated matrix
+    aggregated_cm = np.zeros((num_agg_classes + 1, num_agg_classes + 1), dtype=original_cm.dtype)
+    
+    # Vectorized aggregation of main confusion matrix block
+    orig_i, orig_j = np.meshgrid(np.arange(num_original_nodes), np.arange(num_original_nodes), indexing='ij')
+    agg_i = gt_indices[orig_i.ravel()]
+    agg_j = dt_indices[orig_j.ravel()]
+    values = original_cm[:num_original_nodes, :num_original_nodes].ravel()
+    
+    # Filter and accumulate valid entries
+    valid_mask = (agg_i >= 0) & (agg_j >= 0)
+    if np.any(valid_mask):
+        np.add.at(aggregated_cm, (agg_i[valid_mask], agg_j[valid_mask]), values[valid_mask])
+    
+    # Handle GT to background transitions (vectorized)
+    valid_gt_mask = gt_indices >= 0
+    if np.any(valid_gt_mask):
+        np.add.at(aggregated_cm, 
+                  (gt_indices[valid_gt_mask], np.full(np.sum(valid_gt_mask), num_agg_classes)),
+                  original_cm[:num_original_nodes, num_original_nodes][valid_gt_mask])
+    
+    # Handle background to predictions transitions (vectorized)
+    valid_dt_mask = dt_indices >= 0
+    if np.any(valid_dt_mask):
+        np.add.at(aggregated_cm,
+                  (np.full(np.sum(valid_dt_mask), num_agg_classes), dt_indices[valid_dt_mask]),
+                  original_cm[num_original_nodes, :num_original_nodes][valid_dt_mask])
+    
+    # Background to background
+    aggregated_cm[num_agg_classes, num_agg_classes] = original_cm[num_original_nodes, num_original_nodes]
+    
+    return aggregated_cm, aggregated_labels
 
 
 def calculate_confusion_matrix(dataset,
@@ -311,24 +318,25 @@ def calculate_confusion_matrix(dataset,
     """
     num_classes = len(dataset.metainfo['classes'])
     confusion_matrix = np.zeros(shape=[num_classes + 1, num_classes + 1])
-    # Hierarchical setup
-    tree = None
-    path_lookup = None
+    # Hierarchical setup - taxonomy is required
     class_names = dataset.metainfo['classes']
-    if 'taxonomy' in dataset.metainfo:
-        tree = HierarchyTree(dataset.metainfo['taxonomy'])
-        path_lookup = {}
-        for name in tree.class_to_node.keys():
-            path_lookup[name] = set(tree.get_path(name))
+    if 'taxonomy' not in dataset.metainfo or not dataset.metainfo['taxonomy']:
+        raise ValueError("Taxonomy information is required in dataset.metainfo['taxonomy']")
+    
+    tree = HierarchyTree(dataset.metainfo['taxonomy'])
+    path_lookup = {}
+    for name in tree.class_to_node.keys():
+        path_lookup[name] = set(tree.get_path(name))
 
     assert len(dataset) == len(results)
-    prog_bar = ProgressBar(len(results))
-    for idx, per_img_res in enumerate(results):
+    
+    # Use tqdm for better progress visualization
+    for idx, per_img_res in tqdm(enumerate(results), total=len(results), 
+                                desc="Analyzing detections", unit="img"):
         res_bboxes = per_img_res['pred_instances']
         gts = dataset.get_data_info(idx)['instances']
         analyze_per_img_dets(confusion_matrix, gts, res_bboxes, score_thr,
                              tp_iou_thr, nms_iou_thr, class_names, tree, path_lookup)
-        prog_bar.update()
     return confusion_matrix
 
 
@@ -341,7 +349,7 @@ def analyze_per_img_dets(confusion_matrix,
                          class_names=None,
                          tree=None,
                          path_lookup=None):
-    """Analyze detection results on each image using non-greedy hierarchical matching.
+    """Analyze detection results on each image using optimized hierarchical matching.
 
     Args:
         confusion_matrix (ndarray): The confusion matrix.
@@ -351,74 +359,31 @@ def analyze_per_img_dets(confusion_matrix,
         tp_iou_thr (float): IoU threshold to be considered as matched.
         nms_iou_thr (float|optional): NMS IoU threshold.
         class_names (list): List of class names.
-        tree (HierarchyTree): The hierarchy tree.
-        path_lookup (dict): Lookup table for hierarchy paths.
+        tree (HierarchyTree): The hierarchy tree (required).
+        path_lookup (dict): Lookup table for hierarchy paths (required).
     """
-    # Use standard matching if no hierarchy is provided
+    # Hierarchical matching is now mandatory
     if tree is None or path_lookup is None:
-        # This is the original greedy matching logic from this file
-        true_positives = np.zeros(len(gts))
-        gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
-        gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
-
-        det_labels_all = result['labels'].cpu().numpy() if hasattr(result['labels'], 'cpu') else np.array(result['labels'])
-        det_bboxes_all = result['bboxes'].cpu().numpy() if hasattr(result['bboxes'], 'cpu') else np.array(result['bboxes'])
-        det_scores_all = result['scores'].cpu().numpy() if hasattr(result['scores'], 'cpu') else np.array(result['scores'])
-
-        unique_det_labels = np.unique(det_labels_all)
-        num_classes = confusion_matrix.shape[0] - 1
-
-        for det_label in unique_det_labels:
-            if det_label >= num_classes:
-                continue
-
-            mask = (det_labels_all == det_label) & (det_scores_all >= score_thr)
-            det_bboxes = det_bboxes_all[mask]
-
-            if len(det_bboxes) == 0:
-                continue
-
-            if nms_iou_thr:
-                # Placeholder for NMS if needed, current logic processes per class
-                pass
-
-            if len(gt_bboxes) == 0:
-                for _ in range(len(det_bboxes)):
-                    confusion_matrix[num_classes, det_label] += 1
-                continue
-
-            ious = bbox_overlaps(det_bboxes[:, :4], gt_bboxes)
-            for i in range(len(det_bboxes)):
-                matched_gt = -1
-                best_iou = tp_iou_thr
-
-                for j in range(len(gt_bboxes)):
-                    if ious[i, j] >= best_iou:
-                        best_iou = ious[i, j]
-                        matched_gt = j
-                
-                if matched_gt != -1:
-                    if true_positives[matched_gt] == 0:
-                        true_positives[matched_gt] = 1
-                        confusion_matrix[gt_labels[matched_gt], det_label] += 1
-                    else:
-                        confusion_matrix[num_classes, det_label] += 1
-                else:
-                    confusion_matrix[num_classes, det_label] += 1
-
-        for i in range(len(gt_labels)):
-            if true_positives[i] == 0:
-                confusion_matrix[gt_labels[i], num_classes] += 1
-        return
-
-    # Hierarchical Matching Logic
+        raise ValueError("Hierarchical tree and path_lookup are required for analysis")
+    
     assert class_names is not None
 
-    # 1. Data Preparation
+    # 1. Data Preparation - optimized with early returns
+    if not gts and not result['scores'].numel():
+        return  # Nothing to process
+    
     gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
     gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
+    
+    # Vectorized score filtering
     det_scores = result['scores'].numpy()
     score_mask = det_scores >= score_thr
+    if not np.any(score_mask):
+        # All detections filtered out - add GT to background column
+        for g_label in gt_labels:
+            confusion_matrix[g_label, confusion_matrix.shape[0] - 1] += 1
+        return
+    
     det_bboxes = result['bboxes'].numpy()[score_mask]
     det_labels = result['labels'].numpy()[score_mask]
     det_scores = det_scores[score_mask]
@@ -438,33 +403,43 @@ def analyze_per_img_dets(confusion_matrix,
     G = len(gt_labels)
     num_classes = confusion_matrix.shape[0] - 1
 
+    # Early returns for edge cases
     if G == 0:
-        for d_label in det_labels:
-            confusion_matrix[num_classes, d_label] += 1
+        # No GT, all detections are false positives
+        np.add.at(confusion_matrix, (num_classes, det_labels), 1)
         return
 
     if D == 0:
-        for g_label in gt_labels:
-            confusion_matrix[g_label, num_classes] += 1
+        # No detections, all GT are false negatives
+        np.add.at(confusion_matrix, (gt_labels, num_classes), 1)
         return
 
     # 2. Pre-calculate IoUs
     ious = bbox_overlaps(det_bboxes, gt_bboxes)
 
-    # 3. Initialization for Non-Greedy Matching
+    # 3. Pre-compute label mappings for efficiency
+    label_to_name = {i: name for i, name in enumerate(class_names)}
+    
+    # 4. Initialization for Non-Greedy Matching
     gtm_idx = -np.ones(G, dtype=int)
     gt_hf1 = np.zeros(G)
     d_matched = np.zeros(D, dtype=bool)
     dtIg = np.zeros(D, dtype=bool)
 
     detections_to_process = list(range(D))
-    label_to_name = {i: name for i, name in enumerate(class_names)}
 
-    # 4. Iterative Matching with Stealing
+    # 5. Iterative Matching with Stealing - optimized
     while detections_to_process:
         dind = detections_to_process.pop(0)
         d_label_name = label_to_name.get(det_labels[dind])
         if not d_label_name:
+            continue
+
+        # Pre-filter GT candidates by IoU threshold
+        valid_gt_mask = ious[dind, :] >= tp_iou_thr
+        valid_gt_indices = np.where(valid_gt_mask)[0]
+        
+        if len(valid_gt_indices) == 0:
             continue
 
         best_boost = 1e-9
@@ -473,11 +448,8 @@ def analyze_per_img_dets(confusion_matrix,
         best_unmatched_hf1 = -1.0
         best_unmatched_gt_idx = -1
 
-        for gind in range(G):
-            if ious[dind, gind] < tp_iou_thr:
-                continue
-
-            gt_label_name = label_to_name.get(gt_labels[gind])
+        for gind in valid_gt_indices:
+            gt_label_name = label_to_name.get(int(gt_labels[gind]))
             if not gt_label_name:
                 continue
 
@@ -500,36 +472,37 @@ def analyze_per_img_dets(confusion_matrix,
             prev_d_idx = gtm_idx[best_gt_match_idx]
             if prev_d_idx != -1:
                 d_matched[prev_d_idx] = False
-                detections_to_process.insert(0, prev_d_idx)
+                detections_to_process.insert(0, int(prev_d_idx))
 
             gtm_idx[best_gt_match_idx] = dind
             gt_hf1[best_gt_match_idx] = best_boost + gt_hf1[best_gt_match_idx]
             d_matched[dind] = True
         else:
-            # 5. Ancestor-Ignoring Logic
+            # 6. Ancestor-Ignoring Logic
             if best_unmatched_gt_idx != -1:
                 final_match_d_idx = gtm_idx[best_unmatched_gt_idx]
                 if final_match_d_idx != -1:
-                    final_match_d_label = label_to_name.get(det_labels[final_match_d_idx])
+                    final_match_d_label = label_to_name.get(int(det_labels[final_match_d_idx]))
                     if final_match_d_label and tree.is_descendant(final_match_d_label, d_label_name):
                         dtIg[dind] = True
 
-    # 6. Update Confusion Matrix
-    gt_matched_by_any_det = np.zeros(G, dtype=bool)
-    for dind in range(D):
-        if d_matched[dind]:
-            matched_gind = np.where(gtm_idx == dind)[0]
-            if len(matched_gind) > 0:
-                gind = matched_gind[0]
-                gt_label = gt_labels[gind]
-                det_label = det_labels[dind]
-                confusion_matrix[gt_label, det_label] += 1
-                gt_matched_by_any_det[gind] = True
-        elif not dtIg[dind]:
-            confusion_matrix[num_classes, det_labels[dind]] += 1
+    # 7. Update Confusion Matrix - vectorized where possible
+    matched_detections = np.where(d_matched)[0]
+    for dind in matched_detections:
+        matched_gind = np.where(gtm_idx == dind)[0]
+        if len(matched_gind) > 0:
+            gind = matched_gind[0]
+            confusion_matrix[gt_labels[gind], det_labels[dind]] += 1
 
+    # Handle unmatched detections (false positives)
+    unmatched_non_ignored = np.where(~d_matched & ~dtIg)[0]
+    if len(unmatched_non_ignored) > 0:
+        np.add.at(confusion_matrix, (num_classes, det_labels[unmatched_non_ignored]), 1)
+
+    # Handle unmatched GT (false negatives)
+    matched_gt = gtm_idx >= 0
     for gind in range(G):
-        if not gt_matched_by_any_det[gind]:
+        if not matched_gt[gind]:
             confusion_matrix[gt_labels[gind], num_classes] += 1
 
 
@@ -580,7 +553,8 @@ def plot_confusion_matrix(confusion_matrix,
                           title='Normalized Confusion Matrix',
                           color_theme='plasma',
                           boundaries_info=None,
-                          wrap_width=15):
+                          wrap_width=15,
+                          paper_size=False):
     """
     Draw confusion matrix with matplotlib.
 
@@ -593,6 +567,7 @@ def plot_confusion_matrix(confusion_matrix,
         color_theme (str): Theme of the matrix color map.
         boundaries_info (list|None): Information for drawing boundaries.
         wrap_width (int): Maximum width for wrapping labels.
+        paper_size (bool): Whether to use paper-sized plots.
     """
     # Normalize the confusion matrix.
     per_label_sums = confusion_matrix.sum(axis=1)[:, np.newaxis]
@@ -602,17 +577,36 @@ def plot_confusion_matrix(confusion_matrix,
     confusion_matrix_normalized *= 100
 
     num_classes = len(labels)
-    # Compute dynamic figure size but set minimum dimensions.
-    fig_width = max(8, 0.5 * num_classes)
-    fig_height = max(8, 0.5 * num_classes * 0.8)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=180)
-    cmap = plt.get_cmap(color_theme)
-    im = ax.imshow(confusion_matrix_normalized, cmap=cmap, vmin=0, vmax=100) # Ensure consistent color scale
-    plt.colorbar(mappable=im, ax=ax, shrink=0.8) # Added shrink to colorbar
 
-    title_font = {'weight': 'bold', 'size': 12}
+    if paper_size:
+        # Paper-ready styling
+        fig_width = max(7, 0.3 * num_classes)
+        fig_height = max(7, 0.3 * num_classes * 0.9)
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=200)
+        title_font = {'weight': 'bold', 'size': 12}
+        label_font = {'size': 12}
+        tick_label_size = 10
+        cbar_label_size = 10
+        cell_text_size = 7
+    else:
+        # Default, larger styling for interactive viewing
+        fig_width = int(num_classes * 0.5) + 5
+        fig_height = int(num_classes * 0.5) + 4
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)
+        title_font = {'weight': 'bold', 'size': 16}
+        label_font = {'size': 14}
+        tick_label_size = 12
+        cbar_label_size = 12
+        cell_text_size = 8
+
+    cmap = plt.get_cmap(color_theme)
+    im = ax.imshow(confusion_matrix_normalized, cmap=cmap, vmin=0, vmax=100)
+    
+    # Set colorbar with specific font sizes
+    cbar = plt.colorbar(mappable=im, ax=ax, shrink=0.8)
+    cbar.ax.tick_params(labelsize=cbar_label_size)
+
     ax.set_title(title, fontdict=title_font)
-    label_font = {'size': 10}
     plt.ylabel('Ground Truth Label', fontdict=label_font)
     plt.xlabel('Prediction Label', fontdict=label_font)
 
@@ -634,7 +628,7 @@ def plot_confusion_matrix(confusion_matrix,
         # Level 0 (highest conceptual) will be white, then lime, cyan, etc.
         boundary_colors = ['white', 'lime', 'cyan', 'magenta', 'orange']
         
-        for level, group_name, start, end in boundaries_info_sorted:
+        for level, _, start, end in boundaries_info_sorted:
             # Prominence: Higher conceptual levels (lower 'level') are thicker and more opaque
             lw = 2.5 - (level * 0.5) 
             alpha = 0.8 - (level * 0.15)
@@ -664,8 +658,8 @@ def plot_confusion_matrix(confusion_matrix,
     ax.set_yticklabels(wrapped_labels)
     
     # Adjust tick parameters.
-    ax.tick_params(axis='x', bottom=False, top=True, labelbottom=False, labeltop=True, pad=10, labelsize=8) # Reduced label size
-    ax.tick_params(axis='y', labelsize=8, pad=10) # Reduced label size
+    ax.tick_params(axis='x', bottom=False, top=True, labelbottom=False, labeltop=True, pad=10, labelsize=tick_label_size)
+    ax.tick_params(axis='y', labelsize=tick_label_size, pad=10)
     plt.setp(ax.get_xticklabels(), rotation=45, ha='left', rotation_mode='anchor')
 
     # Draw the numeric values inside each cell.
@@ -682,11 +676,11 @@ def plot_confusion_matrix(confusion_matrix,
                 # These colormaps generally go from dark to light as value increases.
                 text_color = 'white' if val < 50 else 'black' # If cell is dark, use white text.
             elif color_theme in ['binary', 'gray', 'gist_gray']:
-                 text_color = 'white' if val < 50 else 'black' # Similar logic for grayscale
+                text_color = 'white' if val < 50 else 'black' # Similar logic for grayscale
             else: # Default for other cmaps, or could be more specific
                 text_color = 'white' if val > 50 else 'black' # If cell is light, use black text.
             ax.text(
-                j, i, f'{val:.1f}', ha='center', va='center', color=text_color, fontsize=7) # Reduced fontsize
+                j, i, f'{val:.1f}', ha='center', va='center', color=text_color, fontsize=cell_text_size)
 
     ax.set_ylim(len(confusion_matrix_normalized) - 0.5, -0.5)  # matplotlib>3.1.1
     
@@ -702,178 +696,173 @@ def plot_confusion_matrix(confusion_matrix,
     plt.close(fig) # Close the figure after saving/showing to free memory
 
 
+def prepare_hierarchical_data(dataset, taxonomy_tree):
+    """
+    Prepare hierarchical data for confusion matrix generation.
+    
+    Optimized with efficient filtering and single-pass operations.
+    """
+    original_labels = dataset.metainfo['classes']
+    original_label_set = set(original_labels)
+    
+    # Get leaf hierarchy paths using optimized function
+    all_leaf_paths = get_leaf_hierarchy_paths(taxonomy_tree)
+    
+    # Efficient filtering using set membership
+    plottable_leaf_paths = [
+        item for item in all_leaf_paths if item[0] in original_label_set
+    ]
+    
+    if not plottable_leaf_paths:
+        raise ValueError("No common leaf classes found between taxonomy and dataset")
+    
+    # Get sorted order and boundaries using optimized function
+    sorted_leaf_paths, boundaries = compute_hierarchy_boundaries(plottable_leaf_paths)
+    ordered_leaf_names = [item[0] for item in sorted_leaf_paths]
+    
+    # Efficient set difference for excluded classes
+    excluded_classes = original_label_set - set(ordered_leaf_names)
+    if excluded_classes:
+        print(f"Warning: Excluding non-leaf classes from hierarchical matrix: {sorted(excluded_classes)}")
+    
+    return ordered_leaf_names, boundaries
+
+
+def generate_level_confusion_matrix(confusion_matrix, taxonomy_tree, level, dataset_classes, args, cache=None):
+    """Generate confusion matrix for a specific aggregation level."""
+    # Create cache once if not provided
+    if cache is None:
+        cache = HierarchyCache(taxonomy_tree)
+    
+    # Aggregate matrix using cached hierarchy information
+    agg_matrix, agg_labels = aggregate_confusion_matrix(
+        confusion_matrix, taxonomy_tree, level, dataset_classes, cache
+    )
+    
+    plot_matrix = agg_matrix
+    plot_labels = agg_labels
+    boundaries = None
+    agg_labels_no_bg = agg_labels[:-1]
+    
+    # Determine title
+    max_level = taxonomy_tree.root.get_height()
+    if level == max_level:
+        title_suffix = "Leaf Level (Full Hierarchy)"
+    elif level == 0:
+        title_suffix = "Root Level (Most Aggregated)"
+    else:
+        title_suffix = f"Aggregated Level {level}"
+    
+    # Compute boundaries for visualization if multiple classes
+    if len(agg_labels_no_bg) > 1:
+        items_for_boundaries = []
+        for label_name in agg_labels_no_bg:
+            if label_name in taxonomy_tree.class_to_node:
+                ancestors = taxonomy_tree.get_ancestors(label_name)
+                items_for_boundaries.append((label_name, ancestors))
+            else:
+                items_for_boundaries.append((label_name, []))
+        
+        sorted_items, boundaries = compute_hierarchy_boundaries(items_for_boundaries)
+        
+        # Reorder matrix if needed
+        if boundaries:
+            final_labels_no_bg = [item[0] for item in sorted_items]
+            if final_labels_no_bg != agg_labels_no_bg:
+                plot_matrix, plot_labels = reorder_confusion_matrix(
+                    agg_matrix, agg_labels_no_bg, final_labels_no_bg
+                )
+    
+    # Generate plot
+    plot_confusion_matrix(
+        plot_matrix,
+        plot_labels,
+        save_path=os.path.join(args.save_dir, f'confusion_matrix_level_{level}.png'),
+        show=args.show,
+        title=f'Normalized Confusion Matrix ({title_suffix})',
+        color_theme=args.color_theme,
+        boundaries_info=boundaries,
+        paper_size=args.paper_size
+    )
+
+
+def reorder_confusion_matrix(matrix, original_labels_no_bg, new_labels_no_bg):
+    """
+    Reorder confusion matrix according to new label order.
+    
+    Optimized with vectorized numpy operations.
+    """
+    N = len(original_labels_no_bg)
+    
+    # Create reorder mapping efficiently
+    label_to_idx = {label: i for i, label in enumerate(original_labels_no_bg)}
+    reorder_indices = np.array([label_to_idx[label] for label in new_labels_no_bg])
+    
+    # Vectorized reordering using advanced indexing
+    new_matrix = np.zeros_like(matrix)
+    
+    # Reorder main NxN block in one operation
+    new_matrix[:N, :N] = matrix[np.ix_(reorder_indices, reorder_indices)]
+    
+    # Reorder background row and column
+    new_matrix[N, :N] = matrix[N, reorder_indices]
+    new_matrix[:N, N] = matrix[reorder_indices, N]
+    
+    # Keep background-to-background unchanged
+    new_matrix[N, N] = matrix[N, N]
+    
+    new_labels = new_labels_no_bg + ['background']
+    return new_matrix, new_labels
+
+
 def main():
     args = parse_args()
 
+    # Load and configure
     cfg = Config.fromfile(args.config)
-
     cfg = replace_cfg_vals(cfg)
-
     update_data_root(cfg)
-
+    
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
     init_default_scope(cfg.get('default_scope', 'mmdet'))
-
-    results = load(args.prediction_path)
-
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-
-    dataset = DATASETS.build(cfg.test_dataloader.dataset)
-    _ = dataset.metainfo
-
-    confusion_matrix_raw = calculate_confusion_matrix(dataset, results,
-                                                  args.score_thr,
-                                                  args.nms_iou_thr,
-                                                  args.tp_iou_thr)
     
-    original_labels_no_bg = list(dataset.metainfo['classes'])
-    num_classes_no_bg = len(original_labels_no_bg)
-    original_label_to_idx = {label: i for i, label in enumerate(original_labels_no_bg)}
-
-    # Initialize variables that will be set in the if/else block
-    ordered_leaf_names = []
-    boundaries_for_plot = None
-    confusion_matrix_to_plot = None
-    labels_to_plot = []
-    # flat_tax_sorted needs to be defined for the aggregate mode later, even if taxonomy is not used for hierarchy plot
-    flat_tax_sorted = [] 
-    taxonomy_tree = None # Initialize to None
-
-    if 'taxonomy' in dataset.metainfo and dataset.metainfo['taxonomy']:
-        taxonomy_tree = HierarchyTree(dataset.metainfo['taxonomy'])
-        all_taxonomy_leaves_with_paths = flatten_taxonomy_with_paths(taxonomy_tree)
-        
-        plottable_leaves_with_paths_unsorted = [
-            item for item in all_taxonomy_leaves_with_paths if item[0] in original_label_to_idx
-        ]
-
-        if not plottable_leaves_with_paths_unsorted:
-            print("Warning: No common leaf classes found between taxonomy and dataset. Plotting non-hierarchically.")
-            labels_to_plot = original_labels_no_bg + ['background']
-            confusion_matrix_to_plot = confusion_matrix_raw
-            boundaries_for_plot = None
-            ordered_leaf_names = original_labels_no_bg 
-            # flat_tax_sorted remains empty as there's no valid taxonomy structure to use
-        else:
-            # Build boundaries and the final sorted order using ONLY these plottable leaves
-            # build_nested_boundaries returns the sorted list as its first element
-            flat_tax_sorted, boundaries_for_plot = build_nested_boundaries(plottable_leaves_with_paths_unsorted)
-            # raise Exception(f"flat_tax_sorted: {flat_tax_sorted}, boundaries_for_plot: {boundaries_for_plot}")
-            ordered_leaf_names = [item[0] for item in flat_tax_sorted] # Final order for plot
-
-            dataset_classes_excluded = [
-                name for name in original_labels_no_bg if name not in ordered_leaf_names
-            ]
-            if dataset_classes_excluded:
-                print(f"Warning: The following dataset classes are not recognized leaf nodes in the provided taxonomy "
-                      f"or are not part of the plottable set, and will be EXCLUDED from the hierarchical "
-                      f"confusion matrix: {dataset_classes_excluded}")
-
-            # Reorder the entire matrix, including the background row/column, in one step
-            confusion_matrix_to_plot = confusion_matrix_raw
-
-            labels_to_plot = ordered_leaf_names + ['background']
-
-    else: # No taxonomy in dataset.metainfo or taxonomy is empty
-        labels_to_plot = original_labels_no_bg + ['background']
-        confusion_matrix_to_plot = confusion_matrix_raw
-        boundaries_for_plot = None
-        ordered_leaf_names = original_labels_no_bg 
-        taxonomy_tree = None # No tree to use for aggregation
-        # flat_tax_sorted remains empty
-        print("No taxonomy information found in dataset.metainfo or taxonomy is empty. Plotting with original class order.")
-
-    # Always use the aggregation logic. If no taxonomy, it plots a non-hierarchical matrix.
-    if not taxonomy_tree: # Check if taxonomy_tree was initialized
-        print("No taxonomy information available. Plotting a single non-hierarchical confusion matrix.")
-        plot_confusion_matrix(
-            confusion_matrix_to_plot, # Should be confusion_matrix_raw if no taxonomy
-            labels_to_plot,           # Should be original_labels_no_bg + ['background']
-            save_path=os.path.join(args.save_dir, 'confusion_matrix_flat.png'),
-            show=args.show,
-            title='Normalized Confusion Matrix (Flat)',
-            color_theme=args.color_theme,
-            boundaries_info=None # No boundaries for a flat matrix
+    # Load results and dataset
+    results = load(args.prediction_path)
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    dataset = DATASETS.build(cfg.test_dataloader.dataset)
+    
+    # Validate taxonomy requirement
+    if 'taxonomy' not in dataset.metainfo or not dataset.metainfo['taxonomy']:
+        raise ValueError("Taxonomy information is required in dataset.metainfo['taxonomy']")
+    
+    # Calculate raw confusion matrix
+    confusion_matrix_raw = calculate_confusion_matrix(
+        dataset, results, args.score_thr, args.nms_iou_thr, args.tp_iou_thr
+    )
+    
+    # Prepare hierarchical data
+    taxonomy_tree = HierarchyTree(dataset.metainfo['taxonomy'])
+    ordered_leaf_names, _ = prepare_hierarchical_data(dataset, taxonomy_tree)
+    
+    # Create hierarchy cache once for reuse across all levels
+    hierarchy_cache = HierarchyCache(taxonomy_tree)
+    
+    # Generate confusion matrices for all aggregation levels
+    max_agg_level = taxonomy_tree.root.get_height()
+    print(f"Generating confusion matrices for levels 0 (root) to {max_agg_level} (leaves)")
+    
+    for level in tqdm(range(max_agg_level + 1), desc="Generating level matrices"):
+        if not ordered_leaf_names:
+            print(f"No leaf labels to aggregate at level {level}. Skipping.")
+            continue
+            
+        generate_level_confusion_matrix(
+            confusion_matrix_raw, taxonomy_tree, level, 
+            dataset.metainfo['classes'], args, hierarchy_cache
         )
-    else:
-        # Aggregation logic
-        max_agg_level = taxonomy_tree.root.get_height()
-
-        ordered_labels_leaf_for_agg = ordered_leaf_names # These are the leaves in confusion_matrix_to_plot
-
-        levels_to_aggregate = []
-        print(f"Plotting all aggregation levels from 0 (root) to {max_agg_level} (leaves).")
-        levels_to_aggregate = range(0, max_agg_level + 1)
-
-        for level in levels_to_aggregate:
-            if not ordered_labels_leaf_for_agg:
-                # This case should be rare if taxonomy_tree is valid and there are plottable leaves
-                print(f"No leaf labels to aggregate at level {level}. Skipping.")
-                continue
-            
-            current_agg_matrix, current_agg_labels_with_bg = aggregate_confusion_matrix(
-                confusion_matrix_to_plot, 
-                taxonomy_tree, 
-                level, 
-                dataset.metainfo['classes']
-            )
-
-            plot_matrix = current_agg_matrix
-            plot_labels_with_bg = current_agg_labels_with_bg
-            boundaries_for_agg_plot = None
-            current_agg_labels_no_bg = current_agg_labels_with_bg[:-1]
-
-            title_suffix = f"Aggregated Level {level}"
-            if level == max_agg_level:
-                title_suffix = "Leaf Level (Full Hierarchy)"
-            elif level == 0:
-                title_suffix = "Root Level (Most Aggregated)"
-
-            if current_agg_labels_no_bg and len(current_agg_labels_no_bg) > 1:
-                items_for_boundary_calc = []
-                for label_name in current_agg_labels_no_bg:
-                    if label_name in taxonomy_tree.class_to_node:
-                        path_to_parent = taxonomy_tree.get_ancestors(label_name)
-                        items_for_boundary_calc.append((label_name, path_to_parent))
-                    else:
-                        items_for_boundary_calc.append((label_name, []))
-                
-                path_sorted_items, boundaries_for_agg_plot = build_nested_boundaries(items_for_boundary_calc)
-                
-                if boundaries_for_agg_plot:
-                    final_plot_labels_no_bg = [item[0] for item in path_sorted_items]
-                    if final_plot_labels_no_bg != current_agg_labels_no_bg:
-                        N = len(current_agg_labels_no_bg)
-                        current_cm_main_part = current_agg_matrix[:N, :N]
-                        current_bg_row = current_agg_matrix[N, :N]
-                        current_bg_col = current_agg_matrix[:N, N]
-                        map_alpha_to_idx = {label: i for i, label in enumerate(current_agg_labels_no_bg)}
-                        reorder_indices_for_path_sort = [map_alpha_to_idx[label] for label in final_plot_labels_no_bg]
-                        reordered_cm_main_part = current_cm_main_part[np.ix_(reorder_indices_for_path_sort, reorder_indices_for_path_sort)]
-                        reordered_bg_row = current_bg_row[reorder_indices_for_path_sort]
-                        reordered_bg_col = current_bg_col[reorder_indices_for_path_sort]
-                        new_plot_matrix = np.zeros_like(current_agg_matrix)
-                        new_plot_matrix[:N, :N] = reordered_cm_main_part
-                        new_plot_matrix[N, :N] = reordered_bg_row
-                        new_plot_matrix[:N, N] = reordered_bg_col
-                        new_plot_matrix[N, N] = current_agg_matrix[N, N]
-                        plot_matrix = new_plot_matrix
-                        plot_labels_with_bg = final_plot_labels_no_bg + ['background']
-                else:
-                    boundaries_for_agg_plot = None
-            
-            plot_confusion_matrix(
-                plot_matrix,
-                plot_labels_with_bg, 
-                save_path=os.path.join(args.save_dir, f'confusion_matrix_level_{level}.png'),
-                show=args.show,
-                title=f'Normalized Confusion Matrix ({title_suffix})',
-                color_theme=args.color_theme,
-                boundaries_info=boundaries_for_agg_plot
-            )
 
 
 if __name__ == '__main__':

@@ -9,12 +9,11 @@ from mmcv.ops import nms
 from mmengine import Config, DictAction
 from mmengine.fileio import load
 from mmengine.registry import init_default_scope
-from mmengine.utils import ProgressBar
+from tqdm import tqdm
 
 from mmdet.evaluation import bbox_overlaps
 from mmdet.registry import DATASETS
 from mmdet.utils import replace_cfg_vals, update_data_root
-
 from hod.utils.tree import HierarchyTree
 from collections import defaultdict
 
@@ -29,7 +28,7 @@ def positive_int(value):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Generate confusion matrix from detection results')
+        description='Generate hierarchical prediction distribution from detection results')
     parser.add_argument('config', help='test config file path')
     parser.add_argument(
         'prediction_path', help='prediction path where test .pkl result')
@@ -58,6 +57,17 @@ def parse_args():
         help='nms IoU threshold, only applied when users want to change the'
         'nms IoU threshold.')
     parser.add_argument(
+        '--cfg-options',
+        nargs='+',
+        action=DictAction,
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
+    # Hierarchical prediction distribution specific arguments
+    parser.add_argument(
         '--no-hierarchy-labels',
         dest='show_hierarchy_labels',
         action='store_false',
@@ -82,29 +92,102 @@ def parse_args():
         default=None,
         help='maximum number of hierarchy levels to show (default: show all levels)')
     parser.add_argument(
-        '--aggregate-at-level',
-        type=positive_int,
-        default=None,
-        help='aggregate classes at specific hierarchy level (0=most general, higher=more specific). '
-             'When set, classes are grouped and averaged at this level for cleaner visualization. '
-             'If the value exceeds available hierarchy levels, shows all individual leaf classes. '
-             'Default: None (show all individual leaf classes)')
-    parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
-    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Print the detailed hierarchical distribution table to the console.')
     args = parser.parse_args()
     return args
+
+
+
+class HierarchyCache:
+    """Pre-computed hierarchy information cache for efficient lookups."""
+    
+    def __init__(self, taxonomy_tree):
+        self.tree = taxonomy_tree
+        self._build_cache()
+    
+    def _build_cache(self):
+        """Build all necessary caches in one pass through the tree."""
+        # Core mappings
+        self.node_to_depth = {}
+        self.node_to_ancestors = {}
+        self.depth_to_nodes = {}
+        self.node_to_level_ancestor = {}
+        
+        # Process all nodes in one traversal
+        def _traverse(node, depth=0, ancestors=None):
+            if ancestors is None:
+                ancestors = []
+            
+            name = node.name
+            self.node_to_depth[name] = depth
+            self.node_to_ancestors[name] = ancestors.copy()
+            
+            # Group nodes by depth
+            if depth not in self.depth_to_nodes:
+                self.depth_to_nodes[depth] = []
+            self.depth_to_nodes[depth].append(name)
+            
+            # Pre-compute ancestor at each level
+            if name not in self.node_to_level_ancestor:
+                self.node_to_level_ancestor[name] = {}
+            
+            for level in range(depth + 1):
+                if level < len(ancestors):
+                    self.node_to_level_ancestor[name][level] = ancestors[level]
+                else:
+                    self.node_to_level_ancestor[name][level] = name
+            
+            # Recurse to children
+            new_ancestors = ancestors + [name]
+            for child in node.children:
+                _traverse(child, depth + 1, new_ancestors)
+        
+        _traverse(self.tree.root)
+        
+        # Additional optimizations
+        self.max_depth = max(self.depth_to_nodes.keys()) if self.depth_to_nodes else 0
+        self.leaf_nodes = [name for name, node in self.tree.class_to_node.items() if node.is_leaf()]
+
+
+def get_leaf_hierarchy_paths(taxonomy_tree):
+    """
+    Get sorted leaf nodes with their hierarchy paths.
+    Returns list of tuples: (leaf_name, path_from_root)
+    
+    Optimized with hierarchy cache for efficient construction.
+    """
+    cache = HierarchyCache(taxonomy_tree)
+    
+    # Use cached data for fast construction
+    leaf_paths = []
+    for leaf_name in sorted(cache.leaf_nodes):
+        ancestors = cache.node_to_ancestors[leaf_name]
+        path_from_root = list(reversed(ancestors)) if ancestors else []
+        leaf_paths.append((leaf_name, path_from_root))
+    
+    return leaf_paths
+
+
+def get_aggregation_group_cached(node_label: str, cache: HierarchyCache, agg_level: int) -> str:
+    """
+    Fast aggregation group lookup using pre-computed cache.
+    
+    Args:
+        node_label: Node name to aggregate
+        cache: Pre-computed hierarchy cache
+        agg_level: Target aggregation depth (0-indexed)
+    
+    Returns:
+        Group name for aggregation
+    """
+    # Fast path for unknown nodes
+    if node_label not in cache.node_to_level_ancestor:
+        return node_label
+    
+    # Direct lookup from cache - O(1) operation
+    return cache.node_to_level_ancestor[node_label].get(agg_level, node_label)
 
 
 def calculate_confusion_matrix(dataset,
@@ -128,21 +211,25 @@ def calculate_confusion_matrix(dataset,
     num_classes = len(dataset.metainfo['classes'])
     confusion_matrix = np.zeros(shape=[num_classes + 1, num_classes + 1])
 
-    # Hierarchical setup
+    # Hierarchical setup - taxonomy is required
+    class_names = dataset.metainfo['classes']
+    if 'taxonomy' not in dataset.metainfo or not dataset.metainfo['taxonomy']:
+        raise ValueError("Taxonomy information is required in dataset.metainfo['taxonomy']")
+    
     tree = HierarchyTree(dataset.metainfo['taxonomy'])
     path_lookup = {}
     for name in tree.class_to_node.keys():
         path_lookup[name] = set(tree.get_path(name))
-    class_names = dataset.metainfo['classes']
 
     assert len(dataset) == len(results)
-    prog_bar = ProgressBar(len(results))
-    for idx, per_img_res in enumerate(results):
+    
+    # Use tqdm for better progress visualization
+    for idx, per_img_res in tqdm(enumerate(results), total=len(results), 
+                                desc="Analyzing detections", unit="img"):
         res_bboxes = per_img_res['pred_instances']
         gts = dataset.get_data_info(idx)['instances']
         analyze_per_img_dets(confusion_matrix, gts, res_bboxes, score_thr,
                              tp_iou_thr, nms_iou_thr, class_names, tree, path_lookup)
-        prog_bar.update()
     return confusion_matrix
 
 
@@ -155,7 +242,7 @@ def analyze_per_img_dets(confusion_matrix,
                          class_names=None,
                          tree=None,
                          path_lookup=None):
-    """Analyze detection results on each image using non-greedy hierarchical matching.
+    """Analyze detection results on each image using optimized hierarchical matching.
 
     Args:
         confusion_matrix (ndarray): The confusion matrix.
@@ -165,25 +252,37 @@ def analyze_per_img_dets(confusion_matrix,
         tp_iou_thr (float): IoU threshold to be considered as matched.
         nms_iou_thr (float|optional): NMS IoU threshold.
         class_names (list): List of class names.
-        tree (HierarchyTree): The hierarchy tree.
-        path_lookup (dict): Lookup table for hierarchy paths.
+        tree (HierarchyTree): The hierarchy tree (required).
+        path_lookup (dict): Lookup table for hierarchy paths (required).
     """
+    # Hierarchical matching is now mandatory
+    if tree is None or path_lookup is None:
+        raise ValueError("Hierarchical tree and path_lookup are required for analysis")
+    
     assert class_names is not None
-    assert tree is not None
-    assert path_lookup is not None
 
-    # 1. Data Preparation
+    # 1. Data Preparation - optimized with early returns
+    if not gts and not result['scores'].numel():
+        return  # Nothing to process
+    
     gt_bboxes = np.array([gt['bbox'] for gt in gts]) if gts else np.empty((0, 4))
     gt_labels = np.array([gt['bbox_label'] for gt in gts]) if gts else np.empty((0,))
+    
+    # Vectorized score filtering
     det_scores = result['scores'].numpy()
     score_mask = det_scores >= score_thr
+    if not np.any(score_mask):
+        # All detections filtered out - add GT to background column
+        for g_label in gt_labels:
+            confusion_matrix[g_label, confusion_matrix.shape[0] - 1] += 1
+        return
+    
     det_bboxes = result['bboxes'].numpy()[score_mask]
     det_labels = result['labels'].numpy()[score_mask]
     det_scores = det_scores[score_mask]
 
     if nms_iou_thr and len(det_bboxes) > 0:
-        keep = nms(det_bboxes, det_scores, nms_iou_thr)
-        det_bboxes = det_bboxes[keep]
+        det_bboxes, keep = nms(det_bboxes, det_scores, nms_iou_thr)
         det_labels = det_labels[keep]
         det_scores = det_scores[keep]
 
@@ -195,36 +294,45 @@ def analyze_per_img_dets(confusion_matrix,
 
     D = len(det_labels)
     G = len(gt_labels)
+    num_classes = confusion_matrix.shape[0] - 1
 
+    # Early returns for edge cases
     if G == 0:
-        # All detections are background FPs
-        for d_label in det_labels:
-            confusion_matrix[-1, d_label] += 1
+        # No GT, all detections are false positives
+        np.add.at(confusion_matrix, (num_classes, det_labels), 1)
         return
 
     if D == 0:
-        # All GTs are FNs
-        for g_label in gt_labels:
-            confusion_matrix[g_label, -1] += 1
+        # No detections, all GT are false negatives
+        np.add.at(confusion_matrix, (gt_labels, num_classes), 1)
         return
 
     # 2. Pre-calculate IoUs
     ious = bbox_overlaps(det_bboxes, gt_bboxes)
 
-    # 3. Initialization for Non-Greedy Matching
-    gtm_idx = -np.ones(G, dtype=int)  # Matched detection index for each GT
-    gt_hf1 = np.zeros(G)             # HF1 score for the match of each GT
-    d_matched = np.zeros(D, dtype=bool) # Which detections have been matched
-    dtIg = np.zeros(D, dtype=bool)      # Ignored detections (ancestor-ignoring)
+    # 3. Pre-compute label mappings for efficiency
+    label_to_name = {i: name for i, name in enumerate(class_names)}
+    
+    # 4. Initialization for Non-Greedy Matching
+    gtm_idx = -np.ones(G, dtype=int)
+    gt_hf1 = np.zeros(G)
+    d_matched = np.zeros(D, dtype=bool)
+    dtIg = np.zeros(D, dtype=bool)
 
     detections_to_process = list(range(D))
-    label_to_name = {i: name for i, name in enumerate(class_names)}
 
-    # 4. Iterative Matching with Stealing
+    # 5. Iterative Matching with Stealing - optimized
     while detections_to_process:
         dind = detections_to_process.pop(0)
-        d_label_name = label_to_name.get(det_labels[dind])
+        d_label_name = label_to_name.get(int(det_labels[dind]))
         if not d_label_name:
+            continue
+
+        # Pre-filter GT candidates by IoU threshold
+        valid_gt_mask = ious[dind, :] >= tp_iou_thr
+        valid_gt_indices = np.where(valid_gt_mask)[0]
+        
+        if len(valid_gt_indices) == 0:
             continue
 
         best_boost = 1e-9
@@ -233,19 +341,13 @@ def analyze_per_img_dets(confusion_matrix,
         best_unmatched_hf1 = -1.0
         best_unmatched_gt_idx = -1
 
-        for gind in range(G):
-            if ious[dind, gind] < tp_iou_thr:
-                continue
-
-            gt_label_name = label_to_name.get(gt_labels[gind])
+        for gind in valid_gt_indices:
+            gt_label_name = label_to_name.get(int(gt_labels[gind]))
             if not gt_label_name:
                 continue
 
             metrics = hierarchical_prf_metric(path_lookup, d_label_name, gt_label_name, return_paths=True)
-            if isinstance(metrics, dict):
-                potential_hf1 = metrics.get('hf1', 0.0)
-            else:
-                potential_hf1 = 0.0
+            potential_hf1 = metrics.get('hf1', 0.0) if isinstance(metrics, dict) else 0.0
 
             existing_hf1 = gt_hf1[gind]
             boost = potential_hf1 - existing_hf1
@@ -262,43 +364,39 @@ def analyze_per_img_dets(confusion_matrix,
         if best_gt_match_idx != -1:
             prev_d_idx = gtm_idx[best_gt_match_idx]
             if prev_d_idx != -1:
-                # Steal: requeue the old detection
                 d_matched[prev_d_idx] = False
-                detections_to_process.insert(0, prev_d_idx)
+                detections_to_process.insert(0, int(prev_d_idx))
 
-            # Assign new match
             gtm_idx[best_gt_match_idx] = dind
             gt_hf1[best_gt_match_idx] = best_boost + gt_hf1[best_gt_match_idx]
             d_matched[dind] = True
         else:
-            # 5. Ancestor-Ignoring Logic
+            # 6. Ancestor-Ignoring Logic
             if best_unmatched_gt_idx != -1:
                 final_match_d_idx = gtm_idx[best_unmatched_gt_idx]
                 if final_match_d_idx != -1:
-                    final_match_d_label = label_to_name.get(det_labels[final_match_d_idx])
+                    final_match_d_label = label_to_name.get(int(det_labels[final_match_d_idx]))
                     if final_match_d_label and tree.is_descendant(final_match_d_label, d_label_name):
                         dtIg[dind] = True
 
-    # 6. Update Confusion Matrix based on final matches
-    gt_matched_by_any_det = np.zeros(G, dtype=bool)
-    for dind in range(D):
-        if d_matched[dind]:
-            # Find which GT this detection is matched to
-            matched_gind = np.where(gtm_idx == dind)[0]
-            if len(matched_gind) > 0:
-                gind = matched_gind[0]
-                gt_label = gt_labels[gind]
-                det_label = det_labels[dind]
-                confusion_matrix[gt_label, det_label] += 1
-                gt_matched_by_any_det[gind] = True
-        elif not dtIg[dind]:
-            # Unmatched and not ignored -> Background FP
-            confusion_matrix[-1, det_labels[dind]] += 1
+    # 7. Update Confusion Matrix - vectorized where possible
+    matched_detections = np.where(d_matched)[0]
+    for dind in matched_detections:
+        matched_gind = np.where(gtm_idx == dind)[0]
+        if len(matched_gind) > 0:
+            gind = matched_gind[0]
+            confusion_matrix[gt_labels[gind], det_labels[dind]] += 1
 
-    # Unmatched GTs are FNs
+    # Handle unmatched detections (false positives)
+    unmatched_non_ignored = np.where(~d_matched & ~dtIg)[0]
+    if len(unmatched_non_ignored) > 0:
+        np.add.at(confusion_matrix, (num_classes, det_labels[unmatched_non_ignored]), 1)
+
+    # Handle unmatched GT (false negatives)
+    matched_gt = gtm_idx >= 0
     for gind in range(G):
-        if not gt_matched_by_any_det[gind]:
-            confusion_matrix[gt_labels[gind], -1] += 1
+        if not matched_gt[gind]:
+            confusion_matrix[gt_labels[gind], num_classes] += 1
 
 
 def hierarchical_prf_metric(
@@ -341,6 +439,107 @@ def hierarchical_prf_metric(
         return hf1
 
 
+def aggregate_confusion_matrix(
+    original_cm: np.ndarray,
+    tree: HierarchyTree,
+    agg_level: int,
+    node_labels_in_cm_order: list,
+    cache = None
+) -> tuple:
+    """
+    Aggregate confusion matrix based on hierarchical taxonomy at specified level.
+    
+    Uses vectorized operations with pre-computed hierarchy cache for optimal performance.
+    
+    Args:
+        original_cm: Input confusion matrix with background as last row/col
+        tree: Hierarchy tree
+        agg_level: Target aggregation depth (0-indexed)
+        node_labels_in_cm_order: Node class names (excluding 'background')
+        cache: Pre-computed hierarchy cache (optional, will create if None)
+    
+    Returns:
+        (aggregated_cm, aggregated_labels): Aggregated matrix and labels
+    """
+    num_original_nodes = len(node_labels_in_cm_order)
+    if original_cm.shape != (num_original_nodes + 1, num_original_nodes + 1):
+        raise ValueError(f"Matrix shape {original_cm.shape} doesn't match {num_original_nodes} + background")
+
+    # Use provided cache or create new one
+    if cache is None:
+        cache = HierarchyCache(tree)
+    
+    # Compute aggregation groups for GT and predictions
+    gt_groups = [get_aggregation_group_cached(node_label, cache, agg_level) 
+                 for node_label in node_labels_in_cm_order]
+    
+    dt_groups = []
+    for node_label in node_labels_in_cm_order:
+        node_depth = cache.node_to_depth.get(node_label, float('inf'))
+        
+        # Filter ancestor predictions to background
+        if node_depth < agg_level and not tree.class_to_node.get(node_label, tree.root).is_leaf():
+            dt_groups.append('background')
+        else:
+            dt_groups.append(get_aggregation_group_cached(node_label, cache, agg_level))
+    
+    # Collect unique aggregation groups
+    unique_groups = []
+    seen = set()
+    
+    for group in gt_groups:
+        if group not in seen and group in tree.class_to_node:
+            group_node = tree.class_to_node[group]
+            if group_node.get_depth() == agg_level or (group_node.is_leaf() and group_node.get_depth() < agg_level):
+                unique_groups.append(group)
+                seen.add(group)
+    
+    # Build aggregated matrix structure
+    aggregated_labels = unique_groups + ['background']
+    group_to_idx = {name: i for i, name in enumerate(unique_groups)}
+    num_agg_classes = len(unique_groups)
+    
+    # Create index mappings for vectorized operations
+    gt_indices = np.array([group_to_idx.get(group, -1) for group in gt_groups])
+    dt_indices = np.array([
+        group_to_idx.get(group, num_agg_classes if group == 'background' else -1) 
+        for group in dt_groups
+    ])
+    
+    # Initialize aggregated matrix
+    aggregated_cm = np.zeros((num_agg_classes + 1, num_agg_classes + 1), dtype=original_cm.dtype)
+    
+    # Vectorized aggregation of main confusion matrix block
+    orig_i, orig_j = np.meshgrid(np.arange(num_original_nodes), np.arange(num_original_nodes), indexing='ij')
+    agg_i = gt_indices[orig_i.ravel()]
+    agg_j = dt_indices[orig_j.ravel()]
+    values = original_cm[:num_original_nodes, :num_original_nodes].ravel()
+    
+    # Filter and accumulate valid entries
+    valid_mask = (agg_i >= 0) & (agg_j >= 0)
+    if np.any(valid_mask):
+        np.add.at(aggregated_cm, (agg_i[valid_mask], agg_j[valid_mask]), values[valid_mask])
+    
+    # Handle GT to background transitions (vectorized)
+    valid_gt_mask = gt_indices >= 0
+    if np.any(valid_gt_mask):
+        np.add.at(aggregated_cm, 
+                  (gt_indices[valid_gt_mask], np.full(np.sum(valid_gt_mask), num_agg_classes)),
+                  original_cm[:num_original_nodes, num_original_nodes][valid_gt_mask])
+    
+    # Handle background to predictions transitions (vectorized)
+    valid_dt_mask = dt_indices >= 0
+    if np.any(valid_dt_mask):
+        np.add.at(aggregated_cm,
+                  (np.full(np.sum(valid_dt_mask), num_agg_classes), dt_indices[valid_dt_mask]),
+                  original_cm[num_original_nodes, :num_original_nodes][valid_dt_mask])
+    
+    # Background to background
+    aggregated_cm[num_agg_classes, num_agg_classes] = original_cm[num_original_nodes, num_original_nodes]
+    
+    return aggregated_cm, aggregated_labels
+
+
 def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, verbose=False):
     """Calculate the hierarchical prediction distribution including siblings and cousins.
 
@@ -364,15 +563,15 @@ def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, ve
     def get_valid_indices(class_names):
         return [class_to_idx[name] for name in class_names if name in class_to_idx]
     
-    # Process each leaf node efficiently
-    for leaf in sorted(set(tree.get_leaf_nodes())):
-        if leaf.name not in class_to_idx:
+    # Process each class in the dataset (could be leaf nodes or aggregated nodes)
+    for class_name in sorted(dataset.metainfo['classes']):
+        if class_name not in class_to_idx:
             continue
             
         # Pre-compute frequently used values
-        idx = class_to_idx[leaf.name]
+        idx = class_to_idx[class_name]
         gts = confusion_matrix[idx]
-        leaf_stats = stats[leaf.name]
+        class_stats = stats[class_name]
         
         # Basic stats (combined operations)
         basic_values = {
@@ -382,37 +581,42 @@ def calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, ve
             'fp_bg': confusion_matrix[-1, idx]
         }
         
-        # Hierarchical relationship predictions
-        parent_tp = gts[class_to_idx[leaf.parent.name]] if (leaf.parent and leaf.parent.name in class_to_idx) else 0
-        grandparent = tree.get_grandparent(leaf.name)
-        grandparent_tp = gts[class_to_idx[grandparent]] if (grandparent and grandparent in class_to_idx) else 0
+        # Hierarchical relationship predictions (check if class exists in tree)
+        if class_name in tree.class_to_node:
+            node = tree.class_to_node[class_name]
+            parent_tp = gts[class_to_idx[node.parent.name]] if (node.parent and node.parent.name in class_to_idx) else 0
+            grandparent = tree.get_grandparent(class_name)
+            grandparent_tp = gts[class_to_idx[grandparent]] if (grandparent and grandparent in class_to_idx) else 0
+            
+            # Batch process sibling/cousin/ancestor relationships
+            sibling_tp = gts[get_valid_indices(tree.get_siblings(class_name))].sum() if tree.get_siblings(class_name) else 0
+            cousin_tp = gts[get_valid_indices(tree.get_cousins(class_name))].sum() if tree.get_cousins(class_name) else 0
+            
+            # Optimized ancestor processing (exclude parent/grandparent to avoid double counting)
+            ancestors = set(tree.get_ancestors(class_name))
+            if node.parent and node.parent.name in ancestors:
+                ancestors.discard(node.parent.name)
+            if grandparent:
+                ancestors.discard(grandparent)
+            ancestor_tp = gts[get_valid_indices(ancestors)].sum() if ancestors else 0
+            
+            # Calculate weighted distance efficiently
+            all_ancestors = tree.get_ancestors(class_name)
+            all_ancestor_indices = get_valid_indices(all_ancestors)
+            distance = (gts[all_ancestor_indices] @ np.arange(len(all_ancestors), 
+                       len(all_ancestors) - len(all_ancestor_indices), -1)) if all_ancestor_indices else 0
+        else:
+            # For aggregated nodes not in original tree, set hierarchical relationships to 0
+            parent_tp = grandparent_tp = sibling_tp = cousin_tp = ancestor_tp = distance = 0
         
-        # Batch process sibling/cousin/ancestor relationships
-        sibling_tp = gts[get_valid_indices(tree.get_siblings(leaf.name))].sum() if tree.get_siblings(leaf.name) else 0
-        cousin_tp = gts[get_valid_indices(tree.get_cousins(leaf.name))].sum() if tree.get_cousins(leaf.name) else 0
-        
-        # Optimized ancestor processing (exclude parent/grandparent to avoid double counting)
-        ancestors = set(tree.get_ancestors(leaf.name))
-        if leaf.parent and leaf.parent.name in ancestors:
-            ancestors.discard(leaf.parent.name)
-        if grandparent:
-            ancestors.discard(grandparent)
-        ancestor_tp = gts[get_valid_indices(ancestors)].sum() if ancestors else 0
-        
-        # Calculate weighted distance efficiently
-        all_ancestors = tree.get_ancestors(leaf.name)
-        all_ancestor_indices = get_valid_indices(all_ancestors)
-        distance = (gts[all_ancestor_indices] @ np.arange(len(all_ancestors), 
-                   len(all_ancestors) - len(all_ancestor_indices), -1)) if all_ancestor_indices else 0
-        
-        # Combine all values and update both leaf and total stats
+        # Combine all values and update both class and total stats
         hierarchical_values = {'parent_tp': parent_tp, 'grandparent_tp': grandparent_tp, 
                               'sibling_tp': sibling_tp, 'cousin_tp': cousin_tp, 
                               'ancestor_tp': ancestor_tp, 'distance': distance}
         
         all_values = {**basic_values, **hierarchical_values}
-        leaf_stats.update(all_values)
-        leaf_stats.update(get_additional_stats(leaf_stats))
+        class_stats.update(all_values)
+        class_stats.update(get_additional_stats(class_stats))
         
         # Update totals efficiently
         for key, value in all_values.items():
@@ -481,8 +685,8 @@ def print_hierarchical_prediction_distribution(stats):
     Args:
         stats (dict): The hierarchical prediction distribution statistics.
     """
-    print("\nHierarchical Prediction Distribution Analysis (Leaf Nodes):")
-    header = (f"{'GT Leaf Class':<15} | {'Total GT':>8} | {'TP':>6} | {'FP (BG)':>8} | {'Parent':>8} | {'G.Parent':>9} | {'Sibling':>8} | "
+    print("\nHierarchical Prediction Distribution Analysis:")
+    header = (f"{'GT Class':<15} | {'Total GT':>8} | {'TP':>6} | {'FP (BG)':>8} | {'Parent':>8} | {'G.Parent':>9} | {'Sibling':>8} | "
               f"{'Cousin':>8} | {'Ancestor':>8} | {'%Parent':>8} | {'%G.Parent':>10} | {'%Sibling':>9} | {'%Cousin':>8} | "
               f"{'%Ancestor':>9} | {'FN':>6}")
     print(header)
@@ -1063,9 +1267,12 @@ def plot_stacked_percentage_bar_chart(stats, save_dir, show=True, title_suffix='
     if save_dir:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        save_path = os.path.join(save_dir, f'hierarchical_prediction_distribution_stacked_bar{title_suffix.replace(" ", "_")}.png')
+        # Clean up filename: extract level number and create shorter name
+        level_match = re.search(r'Level (\d+)', title_suffix)
+        level_num = level_match.group(1) if level_match else "unknown"
+        filename = f'hierarchical_distribution_level_{level_num}.png'
+        save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, bbox_inches='tight')
-        print(f"Stacked bar chart saved to {save_path}")
     if show:
         plt.show()
 
@@ -1152,15 +1359,53 @@ def _aggregate_stats_at_level(leaf_names, stats, dataset, aggregate_level, hiera
     return aggregated_leaf_names, aggregated_stats, updated_hierarchy_info
 
 
+def generate_level_hierarchical_distribution(
+    confusion_matrix, taxonomy_tree, level, dataset_classes, args, dataset, cache=None
+):
+    """Generate hierarchical prediction distribution for a specific aggregation level."""
+    # Create cache once if not provided
+    if cache is None:
+        cache = HierarchyCache(taxonomy_tree)
+    
+    # Aggregate matrix using cached hierarchy information
+    agg_matrix, agg_labels = aggregate_confusion_matrix(
+        confusion_matrix, taxonomy_tree, level, dataset_classes, cache
+    )
+    
+    # Create mock dataset for aggregated statistics
+    class MockDataset:
+        def __init__(self, classes, original_dataset):
+            self.metainfo = {'classes': classes[:-1], 'taxonomy': original_dataset.metainfo['taxonomy']}  # Remove 'background'
+    
+    mock_dataset = MockDataset(agg_labels, dataset)
+    
+    # Calculate hierarchical prediction distribution for this level
+    stats = calculate_hierarchical_prediction_distribution(mock_dataset, agg_matrix, args.verbose)
+    
+    # Determine title suffix with consistent level numbering
+    title_suffix = f"Level {level}"
+    
+    # Generate plot with level-specific title
+    plot_stacked_percentage_bar_chart(
+        stats, 
+        args.save_dir, 
+        args.show, 
+        title_suffix=f' - {title_suffix}',
+        dataset=mock_dataset,
+        show_hierarchy_labels=args.show_hierarchy_labels,
+        show_fp_overlay=args.show_fp_overlay,
+        show_sample_overlay=args.show_sample_overlay,
+        use_log_scale=args.use_log_scale,
+        max_hierarchy_levels=args.max_hierarchy_levels
+    )
+
+
 def main():
     args = parse_args()
 
+    # Load and configure
     cfg = Config.fromfile(args.config)
-
-    # replace the ${key} with the value of cfg.key
     cfg = replace_cfg_vals(cfg)
-
-    # update data root according to MMDET_DATASETS
     update_data_root(cfg)
 
     if args.cfg_options is not None:
@@ -1168,32 +1413,37 @@ def main():
 
     init_default_scope(cfg.get('default_scope', 'mmdet'))
 
+    # Load results and dataset
     results = load(args.prediction_path)
-
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
+    os.makedirs(args.save_dir, exist_ok=True)
 
     dataset = DATASETS.build(cfg.test_dataloader.dataset)
-
-    confusion_matrix = calculate_confusion_matrix(dataset, results,
-                                                  args.score_thr,
-                                                  args.nms_iou_thr,
-                                                  args.tp_iou_thr)
     
-    stats = calculate_hierarchical_prediction_distribution(dataset, confusion_matrix, args.verbose)
+    # Validate taxonomy requirement
+    if 'taxonomy' not in dataset.metainfo or not dataset.metainfo['taxonomy']:
+        raise ValueError("Taxonomy information is required in dataset.metainfo['taxonomy']")
 
-    plot_stacked_percentage_bar_chart(
-        stats, 
-        args.save_dir, 
-        args.show, 
-        dataset=dataset,
-        show_hierarchy_labels=args.show_hierarchy_labels,
-        show_fp_overlay=args.show_fp_overlay,
-        show_sample_overlay=args.show_sample_overlay,
-        use_log_scale=args.use_log_scale,
-        max_hierarchy_levels=args.max_hierarchy_levels,
-        aggregate_at_level=args.aggregate_at_level
-    )
+    # Calculate raw confusion matrix
+    confusion_matrix_raw = calculate_confusion_matrix(dataset, results,
+                                                      args.score_thr,
+                                                      args.nms_iou_thr,
+                                                      args.tp_iou_thr)
+    
+    # Prepare hierarchical data
+    taxonomy_tree = HierarchyTree(dataset.metainfo['taxonomy'])
+    
+    # Create hierarchy cache once for reuse across all levels
+    hierarchy_cache = HierarchyCache(taxonomy_tree)
+    
+    # Generate hierarchical prediction distributions for all aggregation levels
+    max_agg_level = taxonomy_tree.root.get_height()
+    print(f"Generating hierarchical prediction distributions for levels 0 (root) to {max_agg_level} (leaves)")
+    
+    for level in tqdm(range(max_agg_level + 1), desc="Generating level distributions"):
+        generate_level_hierarchical_distribution(
+            confusion_matrix_raw, taxonomy_tree, level, 
+            dataset.metainfo['classes'], args, dataset, hierarchy_cache
+        )
 
 
 
