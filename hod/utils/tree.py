@@ -99,6 +99,17 @@ class HierarchyTree:
         
         path_to_node = self.get_path(node_name)
         return ancestor_name in path_to_node
+    
+    def is_ancestor(self, node_name: str, descendant_name: str) -> bool:
+        """Check if a node is an ancestor of another node."""
+        if node_name not in self.class_to_node or descendant_name not in self.class_to_node:
+            return False
+        # A node is considered an ancestor of itself for this logic.
+        if node_name == descendant_name:
+            return True
+        
+        path_to_descendant = self.get_path(descendant_name)
+        return node_name in path_to_descendant
 
     def all_classes(self) -> List[str]:
         return list(self.class_to_node.keys())

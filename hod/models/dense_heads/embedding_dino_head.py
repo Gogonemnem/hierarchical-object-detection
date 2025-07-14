@@ -175,15 +175,26 @@ class EmbeddingDINOHead(DINOHead):
         # exclude background
         if self.loss_cls.use_sigmoid:
             cls_score = cls_score.sigmoid()
-            # case: multi label per query
-            # scores, indexes = cls_score.view(-1).topk(max_per_img)
-            # det_labels = indexes % self.num_classes
-            # bbox_index = indexes // self.num_classes
-            # case: single class per query
-            scores_per_query, labels_per_query = cls_score.max(dim=-1)
-            scores, bbox_index = scores_per_query.topk(max_per_img)
-            det_labels = labels_per_query[bbox_index]
-            # for both cases, bbox_pred is indexed by bbox_index
+            # --- Simple multi-label: top-k per query, then global top-k ---
+            k_per_query = 1  # You can adjust this value, set to -1 for all labels per query
+            num_queries, num_classes = cls_score.shape
+            if k_per_query == -1 or k_per_query > num_classes:
+                # Use all labels per query
+                flat_scores = cls_score.reshape(-1)
+                flat_labels = torch.arange(num_classes, device=cls_score.device).repeat(num_queries)
+                flat_bbox_idx = torch.arange(num_queries, device=cls_score.device).repeat_interleave(num_classes)
+            else:
+                # Get top-k per query
+                topk_scores, topk_labels = cls_score.topk(k_per_query, dim=1)
+                # Flatten all (query, class) pairs
+                flat_scores = topk_scores.reshape(-1)
+                flat_labels = topk_labels.reshape(-1)
+                flat_bbox_idx = torch.arange(num_queries, device=cls_score.device).unsqueeze(1).expand(-1, k_per_query).reshape(-1)
+            # Take global top-k for the image
+            final_scores, final_indices = flat_scores.topk(max_per_img)
+            det_labels = flat_labels[final_indices]
+            bbox_index = flat_bbox_idx[final_indices]
+            scores = final_scores
             bbox_pred = bbox_pred[bbox_index]
         else:
             scores, det_labels = F.softmax(cls_score, dim=-1)[..., :-1].max(-1)
