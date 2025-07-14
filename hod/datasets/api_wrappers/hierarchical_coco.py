@@ -513,9 +513,9 @@ class HierarchicalCOCOeval(COCOeval):
             p = self.params
             iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
             titleMap = {
-                'precision': ('Hierarchical Precision', '(HP)'),
-                'recall': ('Hierarchical Recall', '(HR)'),
-                'f1': ('Hierarchical F1', '(HF1)')
+                'precision': ('Hierarchical Average Precision', '(HAP)'),
+                'recall': ('Hierarchical Average Recall', '(HAR)'),
+                'f1': ('Hierarchical Average F1', '(HAF1)')
             }
             titleStr, typeStr = titleMap[metric]
             iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \

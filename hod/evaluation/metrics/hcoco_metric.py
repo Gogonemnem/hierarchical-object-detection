@@ -117,24 +117,9 @@ class HierarchicalCocoMetric(CocoMetric):
 
             # mapping of hcocoEval.stats
             coco_metric_names = {
-                'mAP': 0,
-                'mAP_50': 1,
-                'mAP_75': 2,
-                'mAP_s': 3,
-                'mAP_m': 4,
-                'mAP_l': 5,
-                'AR@100': 6,
-                'AR@300': 7,
-                'AR@1000': 8,
-                'AR_s@1000': 9,
-                'AR_m@1000': 10,
-                'AR_l@1000': 11,
-                'mF1': 12,
-                'mF1_50': 13,
-                'mF1_75': 14,
-                'mF1_s': 15,
-                'mF1_m': 16,
-                'mF1_l': 17,
+                'hmAP': 0, 'hmAP_50': 1, 'hmAP_75': 2, 'hmAP_s': 3, 'hmAP_m': 4, 'hmAP_l': 5,
+                'hAR@100': 6, 'hAR@300': 7, 'hAR@1000': 8, 'hAR_s@1000': 9, 'hAR_m@1000': 10, 'hAR_l@1000': 11,
+                'hAF1': 12, 'hAF1_50': 13, 'hAF1_75': 14, 'hAF1_s': 15, 'hAF1_m': 16, 'hAF1_l': 17,
             }
             metric_items = self.metric_items
             if metric_items is not None:
@@ -150,8 +135,8 @@ class HierarchicalCocoMetric(CocoMetric):
                 coco_eval.summarize()
                 if metric_items is None:
                     metric_items = [
-                        'AR@100', 'AR@300', 'AR@1000', 'AR_s@1000',
-                        'AR_m@1000', 'AR_l@1000'
+                        'hAR@100', 'hAR@300', 'hAR@1000', 'hAR_s@1000',
+                        'hAR_m@1000', 'hAR_l@1000'
                     ]
 
                 for item in metric_items:
@@ -163,17 +148,11 @@ class HierarchicalCocoMetric(CocoMetric):
                 coco_eval.accumulate()
                 coco_eval.summarize()
 
-                # if metric_items is None:
-
                 if metric_items is None:
-                    #     metric_items = [
-                    #         'mAP', 'mAP_50', 'mAP_75', 'mAP_s', 'mAP_m', 'mAP_l'
-                    #     ]
                     metric_items = [
-                        'mAP', 'mAP_50', 'mAP_75', 'mAP_s', 'mAP_m', 'mAP_l',
-                        'AR@100', 'AR@300', 'AR@1000', 'AR_s@1000', 'AR_m@1000',
-                        'AR_l@1000', 'mF1', 'mF1_50', 'mF1_75', 'mF1_s', 'mF1_m',
-                        'mF1_l'
+                        'hmAP', 'hmAP_50', 'hmAP_75', 'hmAP_s', 'hmAP_m', 'hmAP_l',
+                        'hAR@100', 'hAR@300', 'hAR@1000', 'hAR_s@1000', 'hAR_m@1000', 'hAR_l@1000',
+                        'hAF1', 'hAF1_50', 'hAF1_75', 'hAF1_s', 'hAF1_m', 'hAF1_l',
                     ]
 
                 for metric_item in metric_items:
@@ -182,9 +161,9 @@ class HierarchicalCocoMetric(CocoMetric):
                     eval_results[key] = float(f'{round(val, 3)}')
 
                 stat_groups = {
-                    'mAP': coco_eval.stats[0:6],
-                    'mAR': coco_eval.stats[6:12],
-                    'mF1': coco_eval.stats[12:18],
+                    'hmAP': coco_eval.stats[0:6],
+                    'hAR': coco_eval.stats[6:12],
+                    'hAF1': coco_eval.stats[12:18],
                 }
 
                 for label, values in stat_groups.items():
