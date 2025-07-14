@@ -467,7 +467,7 @@ def run_inference_with_hooks(model, dataset, collector: EmbeddingCollector,
         collector: EmbeddingCollector instance for capturing query embeddings
         config: Configuration for inference parameters (uses defaults if None)
         hierarchy: Optional hierarchy tree for diversity checking
-        labels: Optional class labels for diversity checking
+        labels: Optional class labels for diversity analysis
         
     Returns:
         List[Dict[str, Any]]: Results with embeddings for each processed image
@@ -1677,7 +1677,7 @@ def _calculate_and_print_projection_diagnostics(
             continuity = np.mean(continuity_scores)
             print(f"Continuity (k={k_continuity}): {continuity:.4f} {'✅ Good' if continuity > 0.7 else '⚠️ Moderate' if continuity > 0.5 else '❌ Poor'}")
 
-        # Overall assessment (can be simplified or kept if trust_score and distance_corr are available)
+        # Overall assessment (can be simplified or kept if needed)
         # This part depends on trust_score and distance_corr being successfully computed.
         # For simplicity, I'll omit the direct overall assessment print here, 
         # as the individual metrics already give a good indication.
@@ -1966,8 +1966,8 @@ def calculate_visual_attributes(hierarchy: HierarchyTree,
     
     # Calculate marker sizes
     marker_sizes_raw = np.array([node_subtree_sizes.get(name, 1) for name in filtered_labels])
-    min_marker_size = 20.0
-    max_marker_size = 180.0
+    min_marker_size = 10.0
+    max_marker_size = 100.0
     
     if marker_sizes_raw.size > 0 and np.max(marker_sizes_raw) > np.min(marker_sizes_raw):
         log_s = np.log1p(marker_sizes_raw - np.min(marker_sizes_raw))
@@ -2122,7 +2122,7 @@ def plot_convex_hulls(ax: Axes,
                 
                 # Add the label with subtle styling
                 ax.text(hull_center_x, hull_center_y, display_name,
-                       fontsize=10, fontweight='bold', 
+                       fontsize=8, fontweight='bold', 
                        ha='center', va='center',
                        color=hull_edge_color, alpha=0.8,
                        bbox=dict(boxstyle='round,pad=0.3', 
@@ -2151,7 +2151,7 @@ def plot_convex_hulls(ax: Axes,
             display_name = parent_name.replace('_', ' ').title()
             
             ax.text(mid_x, mid_y, display_name,
-                   fontsize=9, fontweight='bold', 
+                   fontsize=7, fontweight='bold', 
                    ha='center', va='center',
                    color=line_color, alpha=0.8,
                    bbox=dict(boxstyle='round,pad=0.2', 
@@ -2353,15 +2353,15 @@ def overlay_detection_thumbnails(ax: Axes, examples: List[Dict], disable_layout_
     axis_span = min(xlim[1] - xlim[0], ylim[1] - ylim[0])
     
     # Adaptive thumbnail size based on number of examples to avoid overcrowding
-    base_zoom = 0.06
+    base_zoom = 0.05
     if len(examples) > 12:
-        base_zoom = 0.05  # Smaller for more examples
+        base_zoom = 0.04  # Smaller for more examples
     elif len(examples) < 8:
-        base_zoom = 0.07  # Larger for fewer examples
+        base_zoom = 0.06  # Larger for fewer examples
         
     thumbnail_zoom = min(0.4, axis_span * base_zoom)
     print(f"Using thumbnail zoom {thumbnail_zoom:.3f} for {len(examples)} examples")
-    
+
     # Get data coordinates range for better positioning
     data_width = xlim[1] - xlim[0]
     data_height = ylim[1] - ylim[0]
@@ -2519,10 +2519,10 @@ def overlay_detection_thumbnails(ax: Axes, examples: List[Dict], disable_layout_
         # Add the combined text box with improved styling for better readability
         text = ax.text(
             x_clipped, text_y, label_text,
-            fontsize=8.5,            # Slightly larger font
+            fontsize=7.5,            # Slightly larger font
             color='black',           # Black text for best contrast
             weight='bold',           # Bold for better readability 
-            ha='center', 
+            ha='center',
             va='top', 
             zorder=11,
             linespacing=1.2,         # Increased line spacing for better readability
@@ -2574,31 +2574,36 @@ def add_detection_border_legend(ax: Axes):
     
     # Legend data with improved labels that better explain the hierarchical relationships
     legend_items = [
-        (0, 'Exact Match (correct prediction)', '#1B5E20'),      # Dark Green
-        (1, 'Parent (prediction too general)', '#388E3C'),       # Medium Green
-        (2, 'Grandparent (prediction very general)', '#66BB6A'), # Light Green
-        (3, 'Sibling (same parent class)', '#1976D2'),           # Blue
-        (4, 'Cousin (related class)', '#7B1FA2'),                # Purple
-        (5, 'Ancestor (related, more distant)', '#F57C00'),      # Orange
-        (6, 'Off-branch (unrelated class)', '#D32F2F')           # Red
+        (0, 'Correct (Leaf)', '#1B5E20'),      # Dark Green
+        (1, 'Parent', '#388E3C'),       # Medium Green
+        (2, 'Grandparent', '#66BB6A'), # Light Green
+        (3, 'Sibling', '#1976D2'),           # Blue
+        (4, 'Cousin', '#7B1FA2'),                # Purple
+        (5, 'Ancestor', '#F57C00'),      # Orange
+        (6, 'Other Misclass.', '#D32F2F')           # Red
     ]
     legend_items.reverse()
     
     # Create legend elements with better styling - boxes with colored borders
     legend_elements = []
     for _level, label, color in legend_items:
-        # Rectangle with white interior and colored border - matching our new display style
-        rect = patches.Rectangle((0, 0), 1, 1, linewidth=3, 
+        rect = patches.Rectangle((0, 0), 1, 1, linewidth=2.5, 
                                edgecolor=color, facecolor='white', alpha=0.95)
         legend_elements.append((rect, label))
     
-    # Add legend with improved styling and positioning
-    legend = ax.legend([elem[0] for elem in legend_elements], 
-                      [elem[1] for elem in legend_elements],
-                      loc='upper right', bbox_to_anchor=(0.99, 0.99), 
-                      fontsize=10, title="GT-Prediction Relationships", title_fontsize=11,
-                      frameon=True, fancybox=True, shadow=True, framealpha=0.95,
-                      ncol=1)  # Single column for better readability
+    handles = [elem[0] for elem in legend_elements]
+    labels = [elem[1] for elem in legend_elements]
+    
+    legend = ax.legend(handles, labels,
+               loc='upper right', 
+               ncol=1, 
+               fontsize=9, 
+               title="GT-Prediction Relationships", 
+               title_fontsize=10,
+               frameon=True, 
+               fancybox=True, 
+               shadow=True, 
+               framealpha=0.95)
     
     # Style the legend with professional polish
     legend.get_frame().set_facecolor('#fcfcfc')  # Almost white
@@ -2754,7 +2759,7 @@ def plot_prototype_scatter(ax: Axes,
         edgecolors=edge_colors,
         linewidths=2.2,
         alpha=0.95,
-        zorder=6  # Ensure prototypes are above arrows (zorder=5-5.1)
+        zorder=5
     )
 
     texts = []
@@ -2764,8 +2769,8 @@ def plot_prototype_scatter(ax: Axes,
     label_data = sorted(zip(marker_sizes, filtered_labels, filtered_coords), key=lambda x: x[0], reverse=True)
     
     # Use a smaller font for less important (leaf) nodes
-    base_fontsize = 9
-    min_fontsize = 7.5
+    base_fontsize = 8
+    min_fontsize = 6.5
     
     for size, label, (x, y) in label_data:
         # Determine font size based on marker size (hierarchical importance)
@@ -2777,7 +2782,7 @@ def plot_prototype_scatter(ax: Axes,
         display_label = (label[:15] + '..') if len(label) > 17 else label
         
         texts.append(ax.text(x, y, display_label, fontsize=fontsize, ha='center', va='center',
-                             color='black', zorder=12,
+                             color='black', zorder=7,
                              path_effects=[path_effects.withStroke(linewidth=2, foreground='white', alpha=0.7)]))
 
     if texts:
@@ -2899,7 +2904,7 @@ def _plot_panel1_full_structure(
         overlay_detection_thumbnails(ax, detection_examples_for_p1_display, disable_layout_adjustment=False)
     
     add_detection_border_legend(ax)
-    panel1_title = f"Panel 1: Full Structure ({projection_name})\n{model_name_stem}"
+    panel1_title = f"Panel 1: Full Embedding Structure w/ Examples"
     _style_panel_axes(ax, panel1_title, projection_name)
 
     return plotted_nodes_p1, filtered_labels_p1, filtered_coords_p1, marker_sizes_p1, fill_colors_p1, edge_colors_p1
@@ -2944,7 +2949,7 @@ def _plot_panel2_hierarchical_retreat(
         print(f"No detection examples to display for Panel 2 (fallback levels {panel2_fallback_levels}).")
 
     add_detection_border_legend(ax) 
-    panel2_title = "Panel 2: Hierarchical Retreat\n(Parent, Grandparent Fallbacks)" # Updated title slightly
+    panel2_title = "Panel 2: Hierarchical Fallback" # Updated title slightly
     _style_panel_axes(ax, panel2_title, projection_name)
 
 
@@ -3138,7 +3143,7 @@ def generate_detection_projection_plot(
                  print(f"Empty plot placeholder saved to {empty_path}")
         elif save_path: # Combined empty plot
              fig_empty, ax_empty = plt.subplots(1, 1, figsize=(6,6))
-             ax_empty.text(0.5, 0.5, "No data to plot.", ha='center', va='center')
+             ax_empty.text(0.5,0.5, "No data to plot.", ha='center', va='center')
              empty_path = f"{save_path}_nodata.png" # Ensure different name
              fig_empty.savefig(empty_path)
              plt.close(fig_empty)
@@ -3202,7 +3207,7 @@ def generate_detection_projection_plot(
         _fill_colors_p1_base, _edge_colors_p1_base = [], []
 
 
-    panel_figsize = (14, 12) # Slightly adjusted for single panel titles and legends
+    panel_figsize = (9, 9) # Larger square aspect ratio
     timestamp = time.strftime("%Y%m%d-%H%M%S") # For unique filenames if needed
 
     if separate_panels:
@@ -3219,7 +3224,7 @@ def generate_detection_projection_plot(
         fig1.tight_layout(pad=2.0)
         if save_path:
             base, ext = os.path.splitext(save_path)
-            panel1_save_path = f"{base}_panel1_{timestamp}{ext}"
+            panel1_save_path = f"{base}_panel1{ext}"
             print(f"Saving Panel 1 to {panel1_save_path}")
             fig1.savefig(panel1_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
         plt.close(fig1)
@@ -3236,7 +3241,7 @@ def generate_detection_projection_plot(
         fig2.tight_layout(pad=2.0)
         if save_path:
             base, ext = os.path.splitext(save_path)
-            panel2_save_path = f"{base}_panel2_{timestamp}{ext}"
+            panel2_save_path = f"{base}_panel2{ext}"
             print(f"Saving Panel 2 to {panel2_save_path}")
             fig2.savefig(panel2_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
         plt.close(fig2)
@@ -3252,7 +3257,7 @@ def generate_detection_projection_plot(
         fig3.tight_layout(pad=2.0)
         if save_path:
             base, ext = os.path.splitext(save_path)
-            panel3_save_path = f"{base}_panel3_{timestamp}{ext}"
+            panel3_save_path = f"{base}_panel3{ext}"
             print(f"Saving Panel 3 to {panel3_save_path}")
             fig3.savefig(panel3_save_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
         plt.close(fig3)
@@ -3261,7 +3266,7 @@ def generate_detection_projection_plot(
              print("Separate panels generated. Interactive display for multiple separate plots is not enabled by default.")
 
     else: # Combined plot
-        combined_figsize = (36, 12)
+        combined_figsize = (27, 9) # Larger to accommodate 3 square panels
         fig, axes = plt.subplots(1, 3, figsize=combined_figsize, dpi=120)
         ax1, ax2, ax3 = axes.ravel()
         fig.patch.set_facecolor('white')
@@ -3299,7 +3304,7 @@ def generate_detection_projection_plot(
             
             # Construct a descriptive name for the combined plot
             scan_count = len(processed_all_detection_examples) if processed_all_detection_examples else 0
-            detailed_path = f"{base}_{model_name_clean}_3panel_combined_{num_examples_display_p1p3}disp_{scan_count}scan_{timestamp}{ext}"
+            detailed_path = f"{base}_{model_name_clean}_3panel_combined_{num_examples_display_p1p3}disp_{scan_count}scan{ext}"
             
             save_dir_actual = os.path.dirname(detailed_path)
             if save_dir_actual: os.makedirs(save_dir_actual, exist_ok=True)
@@ -3326,9 +3331,9 @@ def parse_args():
     parser.add_argument('config', help='Path to model config file')
     parser.add_argument('model_path', help='Path to trained model checkpoint')
     parser.add_argument('save_dir', help='Directory where the figure will be saved')
-    parser.add_argument('--save-name', default='combined_umap_visualization.png', 
-                       help='Name of the saved figure (default: combined_umap_visualization.png)')
-    parser.add_argument('--num-examples-display', type=int, default=20, 
+    parser.add_argument('--save-name', default='detection_projection_plot.png', 
+                       help='Name of the saved figure (default: detection_projection_plot.png)')
+    parser.add_argument('--num-examples-display', type=int, default=10, 
                        help='Number of detection example thumbnails to display in Panel 1 and 3 (default: 20)')
     parser.add_argument('--num-examples-scan', type=int, default=80,
                        help='Total number of diverse examples to scan/collect for populating all panels (default: 80)')

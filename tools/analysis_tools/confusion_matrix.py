@@ -587,7 +587,7 @@ def plot_confusion_matrix(confusion_matrix,
         label_font = {'size': 12}
         tick_label_size = 10
         cbar_label_size = 10
-        cell_text_size = 7
+        cell_text_size = 12  # Increased for better visibility in paper
     else:
         # Default, larger styling for interactive viewing
         fig_width = int(num_classes * 0.5) + 5
