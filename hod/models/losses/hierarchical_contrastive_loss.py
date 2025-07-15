@@ -1,15 +1,17 @@
 import torch
 
 from mmdet.registry import MODELS
-from hod.models.losses.hierarchical_focal_loss import HierarchicalFocalLoss
+from hod.models.losses.hierarchical_focal_loss import HierarchicalLossBase
 
 @MODELS.register_module()
-class HierarchicalContrastiveLoss(HierarchicalFocalLoss):
+class HierarchicalContrastiveLoss(HierarchicalLossBase):
     def __init__(self,
                  ann_file,
                  aggregate_per='depth',
+                 loss_weight=1.0,
                  **kwargs):
         self.aggregate_per = aggregate_per
+        self.loss_weight = loss_weight
         super().__init__(ann_file=ann_file, **kwargs)
 
     def post_process_taxonomy(self):
