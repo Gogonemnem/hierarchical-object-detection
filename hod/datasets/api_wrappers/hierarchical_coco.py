@@ -221,6 +221,7 @@ class HierarchicalCOCOeval(COCOeval):
             'overlaps': np.zeros((T, D)),
             'len_dt': np.zeros((D)),
             'len_gt': np.zeros((G)),
+            'hprecision': np.zeros((T, D)),
         }
         # Precompute all path lengths
         for dind, d in enumerate(dt):
@@ -317,6 +318,7 @@ class HierarchicalCOCOeval(COCOeval):
                             dtm[tind, prev_d_idx] = 0
                             d_matched[prev_d_idx] = False
                             hierarchical_stats['overlaps'][tind, prev_d_idx] = 0
+                            hierarchical_stats['hprecision'][tind, prev_d_idx] = 0
                             # Add it back to the queue to find a new home.
                             detections_to_process.insert(0, prev_d_idx)
 
@@ -330,6 +332,7 @@ class HierarchicalCOCOeval(COCOeval):
                         # Store the metrics of the new best match
                         gt_hf1[tind, best_gt_match_idx] = best_match_metrics['hf1']
                         hierarchical_stats['overlaps'][tind, dind] = best_match_metrics['len_overlap']
+                        hierarchical_stats['hprecision'][tind, dind] = best_match_metrics['hprecision']
                     
                     # --- Integrated Ancestor-Ignoring Logic ---
                     # If the detection couldn't find a match that offered a positive boost
@@ -396,8 +399,11 @@ class HierarchicalCOCOeval(COCOeval):
         M           = len(p.maxDets)
         precision   = -np.ones((T,R,A,M)) # -1 for the precision of absent categories
         recall      = -np.ones((T,A,M))
-        scores      = -np.ones((T,R,A,M))
         f1          = -np.ones((T,A,M))
+        scores      = -np.ones((T,R,A,M))
+        precision_soft = -np.ones((T, R, A, M))
+        recall_soft    = -np.ones((T, A, M))
+        f1_soft        = -np.ones((T, A, M))
 
         # create dictionary for future indexing
         _pe = self._paramsEval
@@ -435,9 +441,10 @@ class HierarchicalCOCOeval(COCOeval):
                 gtIg = np.concatenate([e['gtIgnore'] for e in E])
                 
                 # Hierarchical Stats
-                overlaps = np.concatenate([e['hstats']['overlaps'][:, :maxDet] for e in E], axis=1)[:, inds]
-                len_dt   = np.concatenate([e['hstats']['len_dt'][:maxDet]   for e in E], axis=0)[inds]
-                len_gt   = np.concatenate([e['hstats']['len_gt'] for e in E], axis=0)
+                overlaps   = np.concatenate([e['hstats']['overlaps'][:, :maxDet] for e in E], axis=1)[:, inds]
+                hprecision = np.concatenate([e['hstats']['hprecision'][:, :maxDet] for e in E], axis=1)[:, inds]
+                len_dt     = np.concatenate([e['hstats']['len_dt'][:maxDet]   for e in E], axis=0)[inds]
+                len_gt     = np.concatenate([e['hstats']['len_gt'] for e in E], axis=0)
 
                 # Mask ignored GTs
                 valid_gt_mask = (gtIg == 0)  # shape: (G,)
@@ -445,6 +452,7 @@ class HierarchicalCOCOeval(COCOeval):
 
                 # Now sum all nodes in valid GT paths (for each IoU threshold)
                 npig = gt_lens_masked.sum(axis=0)
+                n_gt = int((gtIg == 0).sum())
                 if npig == 0:
                     continue
                 
@@ -492,14 +500,52 @@ class HierarchicalCOCOeval(COCOeval):
                         pass
                     precision[t,:,a,m] = np.array(q)
                     scores[t,:,a,m] = np.array(ss)
+                
+                for t in range(T):
+                    # 1) mask out ignored detections
+                    valid_mask    = ~dtIg[t]                       # shape (D,)
+                    soft_tp_scores = hprecision[t][valid_mask]     # hPrecision in [0,1]
+                    soft_fp_scores = 1.0 - soft_tp_scores          # soft “false positives”
+
+                    # 2) build running‐sum PR curve in classic micro style
+                    cum_tp = np.cumsum(soft_tp_scores)             # shape (D_valid,)
+                    cum_fp = np.cumsum(soft_fp_scores)
+
+                    # 3) compute recall & precision
+                    rec_curve  = cum_tp / (n_gt + np.spacing(1))
+                    prec_curve = cum_tp / (cum_tp + cum_fp + np.spacing(1))
+
+                    # 4) enforce monotonicity on precision
+                    for i in range(len(prec_curve) - 2, -1, -1):
+                        prec_curve[i] = max(prec_curve[i], prec_curve[i+1])
+
+                    # 5) sample at your fixed recThrs grid
+                    q = np.zeros((R,), dtype=float)
+                    inds = np.searchsorted(rec_curve, p.recThrs, side='left')
+                    for ri, pi in enumerate(inds):
+                        if pi < len(prec_curve):
+                            q[ri] = prec_curve[pi]
+                    precision_soft[t, :, a, m] = q
+
+                    # 6) record final recall & best‐F1
+                    recall_soft[t, a, m] = rec_curve[-1] if rec_curve.size else 0.0
+                    if rec_curve.size:
+                        f1_scores = 2 * rec_curve * prec_curve / (rec_curve + prec_curve + 1e-6)
+                        f1_soft[t, a, m] = f1_scores.max()
+                    else:
+                        f1_soft[t, a, m] = 0.0
+                
         self.eval = {
             'params': p,
             'counts': [T, R, A, M],
             'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'precision': precision,
-            'recall':   recall,
-            'scores': scores,
-            'f1': f1,
+            'precision':      precision_soft,
+            'recall':         recall_soft,
+            'f1':             f1_soft,
+            'scores':         scores,
+            'precision_node': precision,
+            'recall_node':    recall,
+            'f1_node':        f1,
         }
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format( toc-tic))
@@ -515,7 +561,10 @@ class HierarchicalCOCOeval(COCOeval):
             titleMap = {
                 'precision': ('Hierarchical Average Precision', '(HAP)'),
                 'recall': ('Hierarchical Average Recall', '(HAR)'),
-                'f1': ('Hierarchical Average F1', '(HAF1)')
+                'f1': ('Hierarchical Average F1', '(HAF1)'),
+                'precision_node': ('Node-based Precision', '(Node-HAP)'),
+                'recall_node': ('Node-based Recall', '(Node-HAR)'),
+                'f1_node': ('Node-based F1', '(Node-HAF1)'),
             }
             titleStr, typeStr = titleMap[metric]
             iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \
@@ -529,7 +578,7 @@ class HierarchicalCOCOeval(COCOeval):
             if iouThr is not None:
                 t = np.where(iouThr == p.iouThrs)[0]
                 s = s[t]
-            if metric in ['precision', 'scores']:
+            if metric in ['precision', 'precision_node', 'scores']:
                 # dimension of precision & scores: [TxRxAxM]
                 s = s[:,:,aind,mind]
             else:
@@ -542,7 +591,8 @@ class HierarchicalCOCOeval(COCOeval):
             print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
             return mean_s
         def _summarizeDets():
-            stats = np.zeros((18,))
+            stats = np.zeros((36,))
+            # Soft-binary (default) metrics
             stats[0] = _summarize('precision')
             stats[1] = _summarize('precision', iouThr=.5, maxDets=self.params.maxDets[2])
             stats[2] = _summarize('precision', iouThr=.75, maxDets=self.params.maxDets[2])
@@ -561,9 +611,29 @@ class HierarchicalCOCOeval(COCOeval):
             stats[15] = _summarize('f1', areaRng='small', maxDets=self.params.maxDets[2])
             stats[16] = _summarize('f1', areaRng='medium', maxDets=self.params.maxDets[2])
             stats[17] = _summarize('f1', areaRng='large', maxDets=self.params.maxDets[2])
+            # Node-based metrics (node = hard, ablation)
+            stats[18] = _summarize('precision_node')
+            stats[19] = _summarize('precision_node', iouThr=.5, maxDets=self.params.maxDets[2])
+            stats[20] = _summarize('precision_node', iouThr=.75, maxDets=self.params.maxDets[2])
+            stats[21] = _summarize('precision_node', areaRng='small', maxDets=self.params.maxDets[2])
+            stats[22] = _summarize('precision_node', areaRng='medium', maxDets=self.params.maxDets[2])
+            stats[23] = _summarize('precision_node', areaRng='large', maxDets=self.params.maxDets[2])
+            stats[24] = _summarize('recall_node', maxDets=self.params.maxDets[0])
+            stats[25] = _summarize('recall_node', maxDets=self.params.maxDets[1])
+            stats[26] = _summarize('recall_node', maxDets=self.params.maxDets[2])
+            stats[27] = _summarize('recall_node', areaRng='small', maxDets=self.params.maxDets[2])
+            stats[28] = _summarize('recall_node', areaRng='medium', maxDets=self.params.maxDets[2])
+            stats[29] = _summarize('recall_node', areaRng='large', maxDets=self.params.maxDets[2])
+            stats[30] = _summarize('f1_node')
+            stats[31] = _summarize('f1_node', iouThr=.5, maxDets=self.params.maxDets[2])
+            stats[32] = _summarize('f1_node', iouThr=.75, maxDets=self.params.maxDets[2])
+            stats[33] = _summarize('f1_node', areaRng='small', maxDets=self.params.maxDets[2])
+            stats[34] = _summarize('f1_node', areaRng='medium', maxDets=self.params.maxDets[2])
+            stats[35] = _summarize('f1_node', areaRng='large', maxDets=self.params.maxDets[2])
             return stats
         def _summarizeKps():
-            stats = np.zeros((15,))
+            stats = np.zeros((30,))
+            # Soft-binary (default) metrics
             stats[0] = _summarize('precision', maxDets=20)
             stats[1] = _summarize('precision', maxDets=20, iouThr=.5)
             stats[2] = _summarize('precision', maxDets=20, iouThr=.75)
@@ -579,6 +649,22 @@ class HierarchicalCOCOeval(COCOeval):
             stats[12] = _summarize('f1', maxDets=20, iouThr=.75)
             stats[13] = _summarize('f1', maxDets=20, areaRng='medium')
             stats[14] = _summarize('f1', maxDets=20, areaRng='large')
+            # Node-based metrics
+            stats[15] = _summarize('precision_node', maxDets=20)
+            stats[16] = _summarize('precision_node', maxDets=20, iouThr=.5)
+            stats[17] = _summarize('precision_node', maxDets=20, iouThr=.75)
+            stats[18] = _summarize('precision_node', maxDets=20, areaRng='medium')
+            stats[19] = _summarize('precision_node', maxDets=20, areaRng='large')
+            stats[20] = _summarize('recall_node', maxDets=20)
+            stats[21] = _summarize('recall_node', maxDets=20, iouThr=.5)
+            stats[22] = _summarize('recall_node', maxDets=20, iouThr=.75)
+            stats[23] = _summarize('recall_node', maxDets=20, areaRng='medium')
+            stats[24] = _summarize('recall_node', maxDets=20, areaRng='large')
+            stats[25] = _summarize('f1_node', maxDets=20)
+            stats[26] = _summarize('f1_node', maxDets=20, iouThr=.5)
+            stats[27] = _summarize('f1_node', maxDets=20, iouThr=.75)
+            stats[28] = _summarize('f1_node', maxDets=20, areaRng='medium')
+            stats[29] = _summarize('f1_node', maxDets=20, areaRng='large')
             return stats
         if not self.eval:
             raise Exception('Please run accumulate() first')
@@ -606,22 +692,20 @@ def hierarchical_prf_metric(
     len_dt_path = len(dt_path)
     len_gt_path = len(gt_path)
 
-    if len_dt_path == 0 or len_gt_path == 0:
+    overlap = dt_path & gt_path
+    len_overlap = len(overlap)
+    hprecision = len_overlap / len_dt_path if len_dt_path > 0 else 0.0
+    hrecall = len_overlap / len_gt_path if len_gt_path > 0 else 0.0
+    if hprecision + hrecall == 0:
         hf1 = 0.0
-        len_overlap = 0
     else:
-        overlap = dt_path & gt_path
-        len_overlap = len(overlap)
-        hprecision = len_overlap / len_dt_path
-        hrecall = len_overlap / len_gt_path
-        if hprecision + hrecall == 0:
-            hf1 = 0.0
-        else:
-            hf1 = 2 * (hprecision * hrecall) / (hprecision + hrecall)
+        hf1 = 2 * (hprecision * hrecall) / (hprecision + hrecall)
 
     if return_paths:
         return {
             'hf1': hf1,
+            'hprecision': hprecision,
+            'hrecall': hrecall,
             'len_overlap': len_overlap,
             'len_dt': len_dt_path,
             'len_gt': len_gt_path,

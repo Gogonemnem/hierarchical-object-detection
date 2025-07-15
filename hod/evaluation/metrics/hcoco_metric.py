@@ -120,6 +120,10 @@ class HierarchicalCocoMetric(CocoMetric):
                 'hmAP': 0, 'hmAP_50': 1, 'hmAP_75': 2, 'hmAP_s': 3, 'hmAP_m': 4, 'hmAP_l': 5,
                 'hAR@100': 6, 'hAR@300': 7, 'hAR@1000': 8, 'hAR_s@1000': 9, 'hAR_m@1000': 10, 'hAR_l@1000': 11,
                 'hAF1': 12, 'hAF1_50': 13, 'hAF1_75': 14, 'hAF1_s': 15, 'hAF1_m': 16, 'hAF1_l': 17,
+                # Node-based (hard) metrics
+                'hmAP_node': 18, 'hmAP_50_node': 19, 'hmAP_75_node': 20, 'hmAP_s_node': 21, 'hmAP_m_node': 22, 'hmAP_l_node': 23,
+                'hAR@100_node': 24, 'hAR@300_node': 25, 'hAR@1000_node': 26, 'hAR_s@1000_node': 27, 'hAR_m@1000_node': 28, 'hAR_l@1000_node': 29,
+                'hAF1_node': 30, 'hAF1_50_node': 31, 'hAF1_75_node': 32, 'hAF1_s_node': 33, 'hAF1_m_node': 34, 'hAF1_l_node': 35,
             }
             metric_items = self.metric_items
             if metric_items is not None:
@@ -153,6 +157,10 @@ class HierarchicalCocoMetric(CocoMetric):
                         'hmAP', 'hmAP_50', 'hmAP_75', 'hmAP_s', 'hmAP_m', 'hmAP_l',
                         'hAR@100', 'hAR@300', 'hAR@1000', 'hAR_s@1000', 'hAR_m@1000', 'hAR_l@1000',
                         'hAF1', 'hAF1_50', 'hAF1_75', 'hAF1_s', 'hAF1_m', 'hAF1_l',
+                        # Node-based (hard) metrics
+                        'hmAP_node', 'hmAP_50_node', 'hmAP_75_node', 'hmAP_s_node', 'hmAP_m_node', 'hmAP_l_node',
+                        'hAR@100_node', 'hAR@300_node', 'hAR@1000_node', 'hAR_s@1000_node', 'hAR_m@1000_node', 'hAR_l@1000_node',
+                        'hAF1_node', 'hAF1_50_node', 'hAF1_75_node', 'hAF1_s_node', 'hAF1_m_node', 'hAF1_l_node',
                     ]
 
                 for metric_item in metric_items:
@@ -164,6 +172,10 @@ class HierarchicalCocoMetric(CocoMetric):
                     'hmAP': coco_eval.stats[0:6],
                     'hAR': coco_eval.stats[6:12],
                     'hAF1': coco_eval.stats[12:18],
+                    # Node-based (hard) metrics
+                    'hmAP_node': coco_eval.stats[18:24],
+                    'hAR_node': coco_eval.stats[24:30],
+                    'hAF1_node': coco_eval.stats[30:36],
                 }
 
                 for label, values in stat_groups.items():
