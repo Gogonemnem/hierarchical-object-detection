@@ -198,7 +198,7 @@ class HierarchicalCOCOeval(COCOeval):
         # sort dt highest score first, sort gt ignore last
         gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
         gt = [gt[i] for i in gtind]
-        dtind = np.argsort([-d['score'] for d in dt], kind='mergesort')
+        dtind = np.argsort([-d['score'] for d in dt], kind='mergesort')[:maxDet]
         dt = [dt[i] for i in dtind[0:maxDet]]
         iscrowd = [int(o['iscrowd']) for o in gt]
         # load computed ious
