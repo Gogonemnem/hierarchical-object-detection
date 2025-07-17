@@ -521,7 +521,11 @@ class HierarchicalCOCOeval(COCOeval):
                     rec_curve  = cum_tp_recall / (n_gt + np.spacing(1))
                     prec_curve = cum_tp_precision / (cum_tp_precision + cum_fp + np.spacing(1))
 
-                    # 4) sample at your fixed recThrs grid
+                    # 4) enforce monotonicity on precision
+                    for i in range(len(prec_curve) - 2, -1, -1):
+                        prec_curve[i] = max(prec_curve[i], prec_curve[i+1])
+
+                    # 5) sample at your fixed recThrs grid
                     q = np.zeros((R,), dtype=float)
                     inds = np.searchsorted(rec_curve, p.recThrs, side='left')
                     for ri, pi in enumerate(inds):
@@ -529,7 +533,7 @@ class HierarchicalCOCOeval(COCOeval):
                             q[ri] = prec_curve[pi]
                     precision_soft[t, :, a, m] = q
 
-                    # 5) record final recall & best‐F1
+                    # 6) record final recall & best‐F1
                     recall_soft[t, a, m] = rec_curve[-1] if rec_curve.size else 0.0
                     if rec_curve.size:
                         f1_scores = 2 * rec_curve * prec_curve / (rec_curve + prec_curve + 1e-6)
