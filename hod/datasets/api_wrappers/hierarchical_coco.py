@@ -222,6 +222,7 @@ class HierarchicalCOCOeval(COCOeval):
             'len_dt': np.zeros((D)),
             'len_gt': np.zeros((G)),
             'hprecision': np.zeros((T, D)),
+            'hrecall': np.zeros((T, D))
         }
         # Precompute all path lengths
         for dind, d in enumerate(dt):
@@ -319,6 +320,7 @@ class HierarchicalCOCOeval(COCOeval):
                             d_matched[prev_d_idx] = False
                             hierarchical_stats['overlaps'][tind, prev_d_idx] = 0
                             hierarchical_stats['hprecision'][tind, prev_d_idx] = 0
+                            hierarchical_stats['hrecall'][tind, prev_d_idx] = 0
                             # Add it back to the queue to find a new home.
                             detections_to_process.insert(0, prev_d_idx)
 
@@ -333,6 +335,7 @@ class HierarchicalCOCOeval(COCOeval):
                         gt_hf1[tind, best_gt_match_idx] = best_match_metrics['hf1']
                         hierarchical_stats['overlaps'][tind, dind] = best_match_metrics['len_overlap']
                         hierarchical_stats['hprecision'][tind, dind] = best_match_metrics['hprecision']
+                        hierarchical_stats['hrecall'][tind, dind] = best_match_metrics['hrecall']
                     
                     # --- Integrated Ancestor-Ignoring Logic ---
                     # If the detection couldn't find a match that offered a positive boost
@@ -443,6 +446,7 @@ class HierarchicalCOCOeval(COCOeval):
                 # Hierarchical Stats
                 overlaps   = np.concatenate([e['hstats']['overlaps'][:, :maxDet] for e in E], axis=1)[:, inds]
                 hprecision = np.concatenate([e['hstats']['hprecision'][:, :maxDet] for e in E], axis=1)[:, inds]
+                hrecall    = np.concatenate([e['hstats']['hrecall'][:, :maxDet] for e in E], axis=1)[:, inds]
                 len_dt     = np.concatenate([e['hstats']['len_dt'][:maxDet]   for e in E], axis=0)[inds]
                 len_gt     = np.concatenate([e['hstats']['len_gt'] for e in E], axis=0)
 
@@ -504,22 +508,20 @@ class HierarchicalCOCOeval(COCOeval):
                 for t in range(T):
                     # 1) mask out ignored detections
                     valid_mask    = ~dtIg[t]                       # shape (D,)
-                    soft_tp_scores = hprecision[t][valid_mask]     # hPrecision in [0,1]
-                    soft_fp_scores = 1.0 - soft_tp_scores          # soft “false positives”
+                    soft_tp_precision_scores = hprecision[t][valid_mask]     # hPrecision in [0,1]
+                    soft_tp_recall_scores = hrecall[t][valid_mask]           # hRecall in [0,1]
+                    soft_fp_scores = 1.0 - soft_tp_precision_scores          # soft “false positives”
 
                     # 2) build running‐sum PR curve in classic micro style
-                    cum_tp = np.cumsum(soft_tp_scores)             # shape (D_valid,)
+                    cum_tp_precision = np.cumsum(soft_tp_precision_scores)   # shape (D_valid,)
                     cum_fp = np.cumsum(soft_fp_scores)
+                    cum_tp_recall = np.cumsum(soft_tp_recall_scores)
 
                     # 3) compute recall & precision
-                    rec_curve  = cum_tp / (n_gt + np.spacing(1))
-                    prec_curve = cum_tp / (cum_tp + cum_fp + np.spacing(1))
+                    rec_curve  = cum_tp_recall / (n_gt + np.spacing(1))
+                    prec_curve = cum_tp_precision / (cum_tp_precision + cum_fp + np.spacing(1))
 
-                    # 4) enforce monotonicity on precision
-                    for i in range(len(prec_curve) - 2, -1, -1):
-                        prec_curve[i] = max(prec_curve[i], prec_curve[i+1])
-
-                    # 5) sample at your fixed recThrs grid
+                    # 4) sample at your fixed recThrs grid
                     q = np.zeros((R,), dtype=float)
                     inds = np.searchsorted(rec_curve, p.recThrs, side='left')
                     for ri, pi in enumerate(inds):
@@ -527,7 +529,7 @@ class HierarchicalCOCOeval(COCOeval):
                             q[ri] = prec_curve[pi]
                     precision_soft[t, :, a, m] = q
 
-                    # 6) record final recall & best‐F1
+                    # 5) record final recall & best‐F1
                     recall_soft[t, a, m] = rec_curve[-1] if rec_curve.size else 0.0
                     if rec_curve.size:
                         f1_scores = 2 * rec_curve * prec_curve / (rec_curve + prec_curve + 1e-6)
