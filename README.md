@@ -43,6 +43,10 @@ Hierarchical object detection involves detecting objects while considering their
    ```bash
    docker exec -it <container-name> bash
    ```
+4. Install the package in editable mode inside the container:
+   ```bash
+   pip install -e .
+   ```
 
 ## Dataset Preparation
 
