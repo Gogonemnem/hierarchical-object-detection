@@ -7,6 +7,7 @@ model = dict(
         type='EmbeddingDINOHead',
         # num_classes=# classes in the dataset excluding the parents
         # ann_file=path to the annotation file for hierarchical focal loss,
+        outputs_per_query=1,  # -1 for all classes per query, or k for top-k per query
         cls_curvature=0.0,
         share_cls_layer=False,
         cls_config=dict(
