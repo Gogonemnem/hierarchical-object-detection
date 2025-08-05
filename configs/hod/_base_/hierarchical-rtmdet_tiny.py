@@ -9,13 +9,13 @@ model = dict(
         type='EmbeddingRTMDetSepBNHead',
         # num_classes=# classes in the hierarchical dataset including the parents
         # ann_file=path to the annotation file for hierarchical focal loss,
-        cls_curvature=0.0,
-        cls_config=dict(
-            use_bias=True,
-            use_temperature=True,
-            init_norm_upper_offset=0.5,
-            freeze_embeddings=False,
-        ),
+        # cls_curvature=0.0,
+        # cls_config=dict(
+        #     use_bias=True,
+        #     use_temperature=True,
+        #     init_norm_upper_offset=0.5,
+        #     freeze_embeddings=False,
+        # ),
         loss_cls=dict(
             type='HierarchicalQualityFocalLoss',
             # ann_file=path to the annotation file for hierarchical focal loss,

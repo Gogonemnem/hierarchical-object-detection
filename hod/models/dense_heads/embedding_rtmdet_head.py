@@ -70,30 +70,30 @@ def filter_scores_and_topk(scores, score_thr, topk, results=None, k_per_anchor=N
 
 @MODELS.register_module()
 class EmbeddingRTMDetSepBNHead(RTMDetSepBNHead):
-    def __init__(self,
-                 ann_file='',
-                 cls_curvature=0.0,
-                 cls_config: OptConfigType=None,
-                 loss_embed: OptConfigType=None,
-                 **kwargs):
-        default_cls_config = {}
-        self.cls_config = default_cls_config.copy()
-        if cls_config and isinstance(cls_config, dict):
-            self.cls_config.update(cls_config)
-        self.cls_config['curvature'] = cls_curvature
-        use_embed_loss = loss_embed and isinstance(loss_embed, dict)
-        self.use_cone = use_embed_loss and (loss_embed or {}).get('type', None) == "EntailmentConeLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
-        self.cls_config['use_cone'] = self.use_cone
-        self.use_contrastive = use_embed_loss and (loss_embed or {}).get('type', None) == "HierarchicalContrastiveLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
-        self.tree = None
-        if ann_file:
-            self.load_taxonomy(ann_file)
-        if self.use_cone and loss_embed:
-            self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
-            loss_embed['curvature'] = cls_curvature
-        super().__init__(**kwargs)
-        if use_embed_loss and loss_embed:
-            self.loss_embed = MODELS.build(loss_embed)
+    # def __init__(self,
+    #              ann_file='',
+    #              cls_curvature=0.0,
+    #              cls_config: OptConfigType=None,
+    #              loss_embed: OptConfigType=None,
+    #              **kwargs):
+    #     default_cls_config = {}
+    #     self.cls_config = default_cls_config.copy()
+    #     if cls_config and isinstance(cls_config, dict):
+    #         self.cls_config.update(cls_config)
+    #     self.cls_config['curvature'] = cls_curvature
+    #     use_embed_loss = loss_embed and isinstance(loss_embed, dict)
+    #     self.use_cone = use_embed_loss and (loss_embed or {}).get('type', None) == "EntailmentConeLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
+    #     self.cls_config['use_cone'] = self.use_cone
+    #     self.use_contrastive = use_embed_loss and (loss_embed or {}).get('type', None) == "HierarchicalContrastiveLoss" and (loss_embed or {}).get('loss_weight', 0.0) > 0
+    #     self.tree = None
+    #     if ann_file:
+    #         self.load_taxonomy(ann_file)
+    #     if self.use_cone and loss_embed:
+    #         self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
+    #         loss_embed['curvature'] = cls_curvature
+    #     super().__init__(**kwargs)
+    #     if use_embed_loss and loss_embed:
+    #         self.loss_embed = MODELS.build(loss_embed)
 
     def load_taxonomy(self, ann_file):
         ann = load(ann_file)
@@ -101,102 +101,96 @@ class EmbeddingRTMDetSepBNHead(RTMDetSepBNHead):
         self.tree = HierarchyTree(taxonomy)
         self.class_to_idx = {c['name']: c['id'] for c in ann['categories']}
 
-    def _init_layers(self):
-        # Replace last classifier with embedding classifier
-        super()._init_layers()
-        if self.tree is not None and getattr(self.tree, 'root', None) is not None:
-            root_idx = self.class_to_idx[self.tree.root.name]
-            clip_exempt = [root_idx]
-            self.cls_config['clip_exempt_indices'] = clip_exempt
-        # One embedding classifier per FPN level, like RTMDetSepBNHead
-        self.rtm_cls = nn.ModuleList([
-            EmbeddingClassifier(self.feat_channels, self.cls_out_channels, **self.cls_config)
-            for _ in range(len(self.cls_convs))
-        ])
+    # def _init_layers(self):
+    #     # Replace last classifier with embedding classifier
+    #     super()._init_layers()
+    #     if self.tree is not None and getattr(self.tree, 'root', None) is not None:
+    #         root_idx = self.class_to_idx[self.tree.root.name]
+    #         clip_exempt = [root_idx]
+    #         self.cls_config['clip_exempt_indices'] = clip_exempt
+    #     # One embedding classifier shared across all FPN levels, as a ModuleList for MMDet compatibility
+    #     shared_classifier = EmbeddingClassifier(self.feat_channels, self.cls_out_channels, **self.cls_config)
+    #     self.rtm_cls = nn.ModuleList([shared_classifier for _ in range(len(self.cls_convs))])
 
-    def forward(self, feats: Tuple[Tensor, ...]) -> tuple:
-        """Forward features from the upstream network.
+    # def forward(self, feats: Tuple[Tensor, ...]) -> tuple:
+    #     """Forward features from the upstream network.
 
-        Args:
-            feats (tuple[Tensor]): Features from the upstream network, each is
-                a 4D-tensor.
+    #     Args:
+    #         feats (tuple[Tensor]): Features from the upstream network, each is
+    #             a 4D-tensor.
 
-        Returns:
-            tuple: Usually a tuple of classification scores and bbox prediction
+    #     Returns:
+    #         tuple: Usually a tuple of classification scores and bbox prediction
 
-            - cls_scores (tuple[Tensor]): Classification scores for all scale
-              levels, each is a 4D-tensor, the channels number is
-              num_anchors * num_classes.
-            - bbox_preds (tuple[Tensor]): Box energies / deltas for all scale
-              levels, each is a 4D-tensor, the channels number is
-              num_anchors * 4.
-        """
+    #         - cls_scores (tuple[Tensor]): Classification scores for all scale
+    #           levels, each is a 4D-tensor, the channels number is
+    #           num_anchors * num_classes.
+    #         - bbox_preds (tuple[Tensor]): Box energies / deltas for all scale
+    #           levels, each is a 4D-tensor, the channels number is
+    #           num_anchors * 4.
+    #     """
 
-        cls_scores = []
-        bbox_preds = []
-        for idx, (x, stride) in enumerate(
-                zip(feats, self.prior_generator.strides)):
-            cls_feat = x
-            reg_feat = x
+    #     cls_scores = []
+    #     bbox_preds = []
+    #     for idx, (x, stride) in enumerate(
+    #             zip(feats, self.prior_generator.strides)):
+    #         cls_feat = x
+    #         reg_feat = x
 
-            # Classification conv stack
-            cls_conv = self.cls_convs[idx]
-            if isinstance(cls_conv, nn.Sequential):
-                cls_feat = cls_conv(cls_feat)
-            elif isinstance(cls_conv, nn.ModuleList):
-                for layer in cls_conv:
-                    cls_feat = layer(cls_feat)
-            else:
-                cls_feat = cls_conv(cls_feat)
+    #         # Classification conv stack
+    #         cls_conv = self.cls_convs[idx]
+    #         if isinstance(cls_conv, nn.Sequential):
+    #             cls_feat = cls_conv(cls_feat)
+    #         elif isinstance(cls_conv, nn.ModuleList):
+    #             for layer in cls_conv:
+    #                 cls_feat = layer(cls_feat)
+    #         else:
+    #             cls_feat = cls_conv(cls_feat)
 
-            # Always repeat features for each anchor (priors)
-            N, C, H, W = cls_feat.shape
-            cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(N, H * W * self.num_base_priors, C)
-            cls_score_flat = self.rtm_cls[idx](cls_feat_flat)  # (N, H*W*num_base_priors, num_classes)
-            cls_score = cls_score_flat.permute(0, 2, 1).reshape(N, self.num_base_priors * self.cls_out_channels, H, W)
+    #         # Always repeat features for each anchor (priors)
+    #         N, C, H, W = cls_feat.shape
+    #         cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(N, H * W * self.num_base_priors, C)
+    #         cls_score_flat = self.rtm_cls[idx](cls_feat_flat)  # (N, H*W*num_base_priors, num_classes)
+    #         cls_score = cls_score_flat.permute(0, 2, 1).reshape(N, self.num_base_priors * self.cls_out_channels, H, W)
 
-            # Regression conv stack
-            reg_conv = self.reg_convs[idx]
-            if isinstance(reg_conv, nn.Sequential):
-                reg_feat = reg_conv(reg_feat)
-            elif isinstance(reg_conv, nn.ModuleList):
-                for layer in reg_conv:
-                    reg_feat = layer(reg_feat)
-            else:
-                reg_feat = reg_conv(reg_feat)
+    #         # Regression conv stack
+    #         reg_conv = self.reg_convs[idx]
+    #         if isinstance(reg_conv, nn.Sequential):
+    #             reg_feat = reg_conv(reg_feat)
+    #         elif isinstance(reg_conv, nn.ModuleList):
+    #             for layer in reg_conv:
+    #                 reg_feat = layer(reg_feat)
+    #         else:
+    #             reg_feat = reg_conv(reg_feat)
 
-            # Objectness branch (if used)
-            if self.with_objectness:
-                objectness = self.rtm_obj[idx](reg_feat)
-                cls_score = inverse_sigmoid(
-                    sigmoid_geometric_mean(cls_score, objectness))
+    #         # Objectness branch (if used)
+    #         if self.with_objectness:
+    #             objectness = self.rtm_obj[idx](reg_feat)
+    #             cls_score = inverse_sigmoid(
+    #                 sigmoid_geometric_mean(cls_score, objectness))
 
-            # Regression output
-            if self.exp_on_reg:
-                reg_dist = self.rtm_reg[idx](reg_feat).exp() * stride[0]
-            else:
-                reg_dist = self.rtm_reg[idx](reg_feat) * stride[0]
+    #         # Regression output
+    #         if self.exp_on_reg:
+    #             reg_dist = self.rtm_reg[idx](reg_feat).exp() * stride[0]
+    #         else:
+    #             reg_dist = self.rtm_reg[idx](reg_feat) * stride[0]
 
-            cls_scores.append(cls_score)
-            bbox_preds.append(reg_dist)
-        return tuple(cls_scores), tuple(bbox_preds)
+    #         cls_scores.append(cls_score)
+    #         bbox_preds.append(reg_dist)
+    #     return tuple(cls_scores), tuple(bbox_preds)
 
-    def loss(self, *args, **kwargs):
-        # Standard RTMDet losses
-        loss_dict = super().loss(*args, **kwargs)
-        prototypes = [m.prototypes for m in self.rtm_cls if hasattr(m, 'prototypes') and isinstance(m.prototypes, torch.Tensor)]
-        if len(prototypes) > 0:
-            prototypes = torch.stack(prototypes)
-        else:
-            prototypes = None
-        if self.use_cone and prototypes is not None:
-            base_entail_loss = self.loss_embed(prototypes)
-            loss_dict['loss_entail'] = base_entail_loss * (len(self.rtm_reg) if hasattr(self, 'rtm_reg') else 1)
-        if self.use_contrastive and prototypes is not None:
-            distance_matrix = self.rtm_cls[0].get_distance_logits(prototypes.unsqueeze(0), prototypes)
-            contrastive_loss = self.loss_embed(distance_matrix.squeeze(0))
-            loss_dict['loss_contrastive'] = contrastive_loss * (len(self.rtm_reg) if hasattr(self, 'rtm_reg') else 1)
-        return loss_dict
+    # def loss(self, *args, **kwargs):
+    #     # Standard RTMDet losses
+    #     loss_dict = super().loss(*args, **kwargs)
+    #     prototypes = getattr(self.rtm_cls, 'prototypes', None)
+    #     if self.use_cone and prototypes is not None:
+    #         base_entail_loss = self.loss_embed(prototypes)
+    #         loss_dict['loss_entail'] = base_entail_loss * (len(self.rtm_reg) if hasattr(self, 'rtm_reg') else 1)
+    #     if self.use_contrastive and prototypes is not None:
+    #         distance_matrix = self.rtm_cls[0].get_distance_logits(prototypes.unsqueeze(0), prototypes)
+    #         contrastive_loss = self.loss_embed(distance_matrix.squeeze(0))
+    #         loss_dict['loss_contrastive'] = contrastive_loss * (len(self.rtm_reg) if hasattr(self, 'rtm_reg') else 1)
+    #     return loss_dict
 
     def _predict_by_feat_single(self,
                                 cls_score_list: List[Tensor],
