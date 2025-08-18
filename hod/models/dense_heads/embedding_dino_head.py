@@ -2,18 +2,15 @@ import copy
 
 from torch import nn
 
-from mmengine.fileio import load
 from mmdet.registry import MODELS
 from mmdet.utils import OptConfigType
 
 from hod.models.dense_heads.filtered_dino_head import FilteredDINOHead
 from hod.models.layers import EmbeddingClassifier
-from hod.utils import HierarchyTree
 
 @MODELS.register_module()
 class EmbeddingDINOHead(FilteredDINOHead):
     def __init__(self,
-                 ann_file='',
                  cls_curvature=0.0,
                  share_cls_layer=True,
                  cls_config: OptConfigType=None,
@@ -74,10 +71,6 @@ class EmbeddingDINOHead(FilteredDINOHead):
             and (loss_embed or {}).get('loss_weight', 0.0) > 0
         )
 
-        self.tree = None
-        if ann_file:
-            self.load_taxonomy(ann_file)
-
         if self.use_cone and loss_embed:
             self.cls_config['cone_beta'] = loss_embed.get('beta', 0.1)
             loss_embed['curvature'] = cls_curvature
@@ -86,12 +79,6 @@ class EmbeddingDINOHead(FilteredDINOHead):
 
         if use_embed_loss and loss_embed:
             self.loss_embed = MODELS.build(loss_embed)
-
-    def load_taxonomy(self, ann_file):
-        ann = load(ann_file)
-        taxonomy = ann.get('taxonomy', {})
-        self.tree = HierarchyTree(taxonomy)
-        self.class_to_idx = {c['name']: c['id'] for c in ann['categories']}
 
     def _initialize_cls_branches(self, fc_cls):
         """Helper method to initialize classification branches."""
@@ -108,7 +95,8 @@ class EmbeddingDINOHead(FilteredDINOHead):
             ValueError: If the taxonomy tree or its root is not properly initialized.
         """
         if self.tree is None or getattr(self.tree, 'root', None) is None:
-            raise ValueError("Taxonomy tree or its root is not properly initialized.")
+            # raise ValueError("Taxonomy tree or its root is not properly initialized.")
+            return
 
         root_idx = self.class_to_idx[self.tree.root.name]
         self.cls_config['clip_exempt_indices'] = [root_idx]

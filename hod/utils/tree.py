@@ -147,6 +147,34 @@ class HierarchyTree:
             cousins.extend([child.name for child in sibling.children])
         return cousins
 
+    def get_children_names(self, cls_name: str) -> List[str]:
+        """Get child class names."""
+        node = self.class_to_node[cls_name]
+        return [child.name for child in node.children]
+
+    def get_topo_sorted_nodes(self) -> List[HierarchyNode]:
+        """
+        Returns a list of all nodes in the hierarchy, sorted topologically.
+        The sort is from leaves to root (bottom-up).
+        """
+        in_degree = {node: len(node.children) for node in self.class_to_node.values()}
+        queue = [node for node, degree in in_degree.items() if degree == 0]
+        
+        topo_order = []
+        head = 0
+        while head < len(queue):
+            node = queue[head]
+            head += 1
+            topo_order.append(node)
+            
+            if node.parent:
+                parent = node.parent
+                in_degree[parent] -= 1
+                if in_degree[parent] == 0:
+                    queue.append(parent)
+        
+        return topo_order
+
     def get_leaf_nodes(self) -> List[HierarchyNode]:
         return [node for node in self.class_to_node.values() if node.is_leaf()]
     
