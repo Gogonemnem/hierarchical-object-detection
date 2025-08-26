@@ -21,8 +21,20 @@ class FilteredDINOHead(DINOHead):
         self.load_taxonomy(ann_file)
         super().__init__(*args, **kwargs)
         num_classes = self.num_classes
-        # self.outputs_per_query = max(min(outputs_per_query, num_classes), -2)
-        self.outputs_per_query = -2
+        
+        if isinstance(outputs_per_query, int):
+            self.outputs_per_query = max(min(outputs_per_query, num_classes), -2)
+        elif isinstance(outputs_per_query, str):
+            if outputs_per_query == 'all':
+                self.outputs_per_query = -1
+            elif outputs_per_query in [
+                'lms-0', 'lms', 'local-max-suppression',
+                ]:
+                self.outputs_per_query = -2
+            else:
+                raise ValueError(f"Invalid string for `outputs_per_query`: {outputs_per_query}. "
+                                 "Supported: 'all', 'lms'.")
+
         if self.tree is None and self.outputs_per_query == -2:
             self.outputs_per_query = -1
 
