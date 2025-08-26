@@ -31,7 +31,7 @@ Hierarchical object detection involves detecting objects while considering their
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-repo/hierarchical-object-detection.git
+   git clone https://github.com/Gogonemnem/hierarchical-object-detection.git
    cd hierarchical-object-detection
    ```
 2. Start Docker Compose:
