@@ -13,16 +13,16 @@ TAXONOMY_FUNCTION = {
             "Combat": {
                 "Fighters": {
                     "US Fighters": {
-                        "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}
+                        "F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "X29": {}, "X32": {}, "YF23": {}
                     },
                     "Russian Fighters": {
-                        "Mig29": {}, "Mig31": {}, "Su57": {}
+                        "Mig29": {}, "Mig31": {}, "Su47": {}, "Su57": {}
                     },
                     "Western Fighters": {
                         "JAS39": {}, "Mirage2000": {}, "Rafale": {}, "EF2000": {}, "Tornado": {}
                     },
                     "Asian Fighters": {
-                        "J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}
+                        "F2": {}, "FCK1": {}, "J10": {}, "J20": {}, "J35": {}, "J36": {}, "J50": {}, "JF17": {}, "JH7": {}, "KAAN": {}, "KIZILELMA": {}, "KF21": {}, "T50": {}, "Tejas": {}
                     }
                 },
                 "Attack Aircraft": {
@@ -59,8 +59,12 @@ TAXONOMY_FUNCTION = {
                         "An124": {}, "An22": {}, "An225": {}, "An72": {}, "Il76": {}
                     },
                     "A400M": {},
+                    "C1": {},
                     "C390": {},
-                    "Y20": {}
+                    "WZ10": {},
+                    "WZ9": {},
+                    "Y20": {},
+                    "Z21": {}
                 },
                 "Amphibious Aircraft": {
                     "AG600": {}, "Be200": {}, "CL415": {}, "US2": {}
@@ -68,10 +72,10 @@ TAXONOMY_FUNCTION = {
             },
             "UAV": {
                 "Combat and Reconnaissance Drones": {
-                    "MQ9": {}, "RQ4": {}
+                    "AKINCI": {}, "MQ9": {}, "MQ20": {}, "MQ25": {}, "MQ28": {}, "MQ35": {}, "RQ4": {}
                 },
                 "Tactical UAVs": {
-                    "TB001": {}, "TB2": {}
+                    "TB001": {}, "TB2": {}, "XQ58": {}
                 }
             },
         },
@@ -81,7 +85,7 @@ TAXONOMY_FUNCTION = {
             },
             "Utility Helicopters": {
                 "Land-Based Helicopters": {
-                    "CH47": {}, "Mi8": {}, "Mi26": {}, "UH60": {}
+                    "CH47": {}, "CH53": {}, "Mi8": {}, "Mi26": {}, "NH90": {}, "UH60": {}
                 },
                 "Specialized Helicopters": {
                     "Ka27": {}, "Z19": {}
@@ -90,6 +94,10 @@ TAXONOMY_FUNCTION = {
         },
         "Tiltrotor": {
             "V22": {}, "V280": {}
+        },
+        "Commercial Aircraft": {
+            "AirbusA320": {}, "AirbusA330": {}, "AirbusA340": {}, "AirbusA350": {}, "AirbusA380": {},
+            "Boeing737": {}, "Boeing747": {}, "Boeing757": {}, "Boeing767": {}, "Boeing777": {}, "Boeing787": {}
         }
     }
 }
@@ -99,29 +107,36 @@ TAXONOMY_AREA = {
         "US Aircraft": {
             "Fixed-Wing": {
                 "Combat": {
-                    "Fighters": {"F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "YF23": {}},
+                    "Fighters": {"F117": {}, "F14": {}, "F15": {}, "F16": {}, "F18": {}, "F22": {}, "F35": {}, "F4": {}, "X29": {}, "X32": {}, "YF23": {}},
                     "Attack Aircraft": {"A10": {}, "AV8B": {}},
                     "Bombers": {"B1": {}, "B2": {}, "B21": {}, "B52": {}, "XB70": {}},
                     "Surveillance": {
                         "E2": {},
+                        "E7": {},
                         "High Altitude Reconnaissance": {"SR71": {}, "U2": {}},
                         "P3": {}
                     }
                 },
                 "Cargo Transports": {"C130": {}, "C17": {}, "C2": {}, "C5": {}, "KC135": {}},
                 "US2": {},
-                "UAV": {"MQ9": {}, "RQ4": {}}
+                "Boeing737": {},
+                "Boeing747": {},
+                "Boeing757": {},
+                "Boeing767": {},
+                "Boeing777": {},
+                "Boeing787": {},
+                "UAV": {"MQ9": {}, "MQ20": {}, "MQ25": {}, "MQ28": {}, "MQ35": {}, "RQ4": {}, "XQ58": {}}
             },
             "Rotorcraft": {
                 "AH64": {},
-                "Utility Helicopters": {"CH47": {}, "UH60": {}}
+                "Utility Helicopters": {"CH47": {}, "CH53": {}, "UH60": {}}
             },
             "Tiltrotor": {"V22": {}, "V280": {}}
         },
         "Russian Aircraft": {
             "Fixed-Wing": {
                 "Combat": {
-                    "Fighters": {"Mig29": {}, "Mig31": {}, "Su57": {}},
+                    "Fighters": {"Mig29": {}, "Mig31": {}, "Su47": {}, "Su57": {}},
                     "Su25": {},
                     "Bombers": {"Tu160": {}, "Tu22M": {}, "Tu95": {}, "Su24": {}, "Su34": {}}
                 },
@@ -141,13 +156,26 @@ TAXONOMY_AREA = {
                     "A400M": {},
                     "CL415": {}
                 },
-                "TB2": {}
+                "AirbusA320": {},
+                "AirbusA330": {},
+                "AirbusA340": {},
+                "AirbusA350": {},
+                "AirbusA380": {},
+                "TB2": {},
+                "AKINCI": {}
+            },
+            "Rotorcraft": {
+                "NH90": {}
             }
         },
         "Asian Aircraft": {
             "Fixed-Wing": {
                 "Combat": {
-                    "Fighters": {"J10": {}, "J20": {}, "J35": {}, "JF17": {}, "JH7": {}, "KF21": {}, "KAAN": {}},
+                    "Fighters": {
+                        "F2": {}, "FCK1": {}, "J10": {}, "J20": {}, "J35": {}, "J36": {}, "J50": {},
+                        "JF17": {}, "JH7": {}, "KAAN": {}, "KIZILELMA": {}, "KF21": {}, "T50": {}, "Tejas": {}
+                    },
+                    "Bombers": {"H6": {}},
                     "Surveillance": {
                         "KJ600": {},
                         "WZ7": {}
@@ -155,7 +183,11 @@ TAXONOMY_AREA = {
                 },
                 "Utility": {
                     "Y20": {},
-                    "AG600": {}
+                    "AG600": {},
+                    "C1": {},
+                    "WZ10": {},
+                    "WZ9": {},
+                    "Z21": {}
                 },
                 "TB001": {}
             },

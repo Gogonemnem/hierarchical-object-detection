@@ -8,7 +8,7 @@ custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], 
 
 model = dict(
     bbox_head=dict(
-        num_classes=101,
+        num_classes=134,
         loss_cls=dict(
             ann_file=_base_.test_evaluator.ann_file,
             decay=10,

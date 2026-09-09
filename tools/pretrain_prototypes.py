@@ -6,22 +6,11 @@ from mmengine.registry import OPTIM_WRAPPERS, OPTIMIZERS
 from mmdet.utils import register_all_modules
 import sys
 from pathlib import Path
-import copy # Ensure copy is imported
 
-# Add project root to sys.path to allow importing hod modules
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 register_all_modules()
 
-# Import the centralized pre-training function
 from hod.training.prototypes import perform_prototype_pretraining
-
-# If your custom modules are not automatically registered, ensure they are imported.
-# e.g., from hod.models.layers import EmbeddingClassifier
-# from hod.models.losses import HierarchicalContrastiveLoss, EntailmentConeLoss
-
-# The perform_prototype_pretraining function has been moved to hod.training.prototypes.py
-# Ensure the local definition of perform_prototype_pretraining is removed from this file.
-# The main() function below will now use the imported version.
 
 def main():
     parser = argparse.ArgumentParser(
@@ -29,8 +18,8 @@ def main():
     )
     parser.add_argument('config', type=str, help="Path to the model config file (e.g., configs/dino/your_model_config.py).")
     parser.add_argument(
-        '--output_path', 
-        type=str, 
+        '--output_path',
+        type=str,
         default=None,
         help="Path to save the pre-trained model checkpoint (file or directory). "
              "If a directory, 'pretrained_prototypes.pth' is used. "
@@ -50,7 +39,7 @@ def main():
         output_file = Path(args.output_path)
         if output_file.is_dir():
             output_file = output_file / 'pretrained_prototypes.pth'
-    
+
     try:
         saved_checkpoint_path = perform_prototype_pretraining(
             model_config_path=args.config,

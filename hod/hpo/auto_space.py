@@ -62,12 +62,10 @@ def _recursive_build_flat_search_space(
 
         if sampler_type == "Choice":
             options = config_node.get("options", [])
-            current_key_str = ".".join(current_path_parts) # Moved here, used by both branches
-
             is_choice_of_components = False
-            component_stubs_in_options = [] 
+            component_stubs_in_options = []
             has_none_option_in_choice = False
-            
+
             if options:
                 has_other_simple_options = False # Tracks if non-component/non-None options exist
 
@@ -83,13 +81,13 @@ def _recursive_build_flat_search_space(
                             has_other_simple_options = True
                     else:
                         has_other_simple_options = True
-                
+
                 if component_stubs_in_options and not has_other_simple_options:
                     is_choice_of_components = True
-            
+
             if is_choice_of_components:
                 choice_selector_key = current_key_str + "._CHOICE_TYPE_"
-                
+
                 type_identifiers_for_choice_sampler = [cs["type"] for cs in component_stubs_in_options]
                 if has_none_option_in_choice:
                     type_identifiers_for_choice_sampler.append(None) # Add actual None
@@ -99,13 +97,13 @@ def _recursive_build_flat_search_space(
                      # Fallback to simple choice if, for some reason, no identifiers were collected.
                     print(f"Internal Warning: Component choice at '{current_key_str}' resulted in no type identifiers. Treating as simple choice.")
                     resolved_options = [_resolve_node_to_sampler_or_structure(opt) for opt in options]
-                    if resolved_options or not options: 
+                    if resolved_options or not options:
                         flat_search_space[current_key_str] = tune.choice(resolved_options)
                 else:
                     flat_search_space[choice_selector_key] = tune.choice(list(set(type_identifiers_for_choice_sampler)))
 
                     for comp_stub_dict in component_stubs_in_options: # Only iterate actual component dicts
-                        component_type_name = comp_stub_dict["type"] 
+                        component_type_name = comp_stub_dict["type"]
 
                         for param_key, param_value_stub in comp_stub_dict.items():
                             if param_key == "type":
@@ -118,11 +116,10 @@ def _recursive_build_flat_search_space(
                             )
             else: # Simple Choice (or mixed choice treated as simple)
                 resolved_options = [_resolve_node_to_sampler_or_structure(opt) for opt in options]
-                if resolved_options or not options: 
+                if resolved_options or not options:
                     flat_search_space[current_key_str] = tune.choice(resolved_options)
-        
-        else: # RandInt, Uniform, LogUniform, etc.
-            current_key_str = ".".join(current_path_parts) # Moved here
+
+        else:  # RandInt, Uniform, LogUniform, etc.
             flat_search_space[current_key_str] = _SAMPLER_FACTORY[sampler_type](config_node)
 
     elif isinstance(config_node, Mapping):
@@ -169,10 +166,10 @@ def config_to_param_space(cfg_or_dict: Union[Config, Mapping]) -> Dict[str, Any]
         else:
             # Potentially handle error or warning: shared params should be direct samplers, not choices.
             print(f"Warning: Shared HPO parameter '{name}' is not a simple sampler stub. It will be ignored.")
-            
+
     # 2. Process the rest of the configuration
     _recursive_build_flat_search_space(config_dict, [], flat_search_space)
-    
+
     # Unflatten the search space from dot-separated keys to a nested dict structure.
     # Ray Tune expects param_space to be a nested dict mirroring the config structure
     # where the leaves are the sampler objects.
@@ -189,7 +186,7 @@ def config_to_param_space(cfg_or_dict: Union[Config, Mapping]) -> Dict[str, Any]
                 # This simple unflattening creates dicts for list indices (e.g., {'0': ...}).
                 # _finalize_config_choices in trainable.py needs to be aware if it traverses
                 # such paths, but typically hyperparameters are in dict structures.
-    
+
     return nested_param_space
 
 # Example usage (for testing this file directly):
@@ -200,7 +197,7 @@ if __name__ == '__main__':
             'type': 'MyModel',
             'bbox_head': {
                 'loss_cls': { # Example of a non-choice param
-                    'type': 'FocalLoss', 
+                    'type': 'FocalLoss',
                     'gamma': {'type': 'Uniform', 'lower': 1.0, 'upper': 3.0},
                     'alpha': 0.25 # Literal
                 },
@@ -210,13 +207,13 @@ if __name__ == '__main__':
                         {
                             'type': 'HierarchicalContrastiveLoss', # Option 1 type
                             'loss_weight': {'type': 'LogUniform', 'lower': 0.01, 'upper': 1.0},
-                            'ann_file': 'path/to/ann1.json', 
+                            'ann_file': 'path/to/ann1.json',
                             'temperature': {'type': 'Uniform', 'lower': 0.05, 'upper': 0.2}
                         },
                         {
                             'type': 'EntailmentConeLoss', # Option 2 type
                             'beta': {'type': 'Uniform', 'lower': 0.1, 'upper': 0.5},
-                            'loss_weight': 1.0 
+                            'loss_weight': 1.0
                         }
                     ]
                 }
@@ -226,7 +223,7 @@ if __name__ == '__main__':
             'lr': {'type': 'LogUniform', 'lower': 1e-5, 'upper': 1e-3}
         },
         'data': { # Simple choice
-            'samples_per_gpu': {'type': 'Choice', 'options': [2, 4, 8]} 
+            'samples_per_gpu': {'type': 'Choice', 'options': [2, 4, 8]}
         },
         'other_choice': { # Choice of direct samplers
              'type': 'Choice',
@@ -268,3 +265,4 @@ if __name__ == '__main__':
     # HPO-defined parameters (both sampled and literal) with the original base model config.
     # This ensures that non-tuned parameters of a chosen component are correctly set according
     # to the HPO configuration stub for that component.
+

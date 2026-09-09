@@ -66,8 +66,8 @@ class EntailmentConeLoss(nn.Module, HierarchicalDataMixin):
             ]
 
             # descendants and itself are not a negatives
-            neg_mask[p_idx, desc_idx] = False  
-            
+            neg_mask[p_idx, desc_idx] = False
+
             # remove itself from descendants
             desc_idx.remove(p_idx)
             pos_mask[p_idx, desc_idx] = True

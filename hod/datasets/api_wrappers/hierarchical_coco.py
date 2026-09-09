@@ -1,10 +1,12 @@
 import time
 import copy
 import datetime
+import itertools
 from collections import defaultdict
 from typing import Dict
 
 import numpy as np
+import torch.multiprocessing as mp
 from pycocotools import mask as maskUtils
 from tqdm import tqdm
 
@@ -65,7 +67,7 @@ class HierarchicalCOCOeval(COCOeval):
             self._dts[dt['image_id']].append(dt)
         self.evalImgs = defaultdict(list)   # per-image per-category evaluation results
         self.eval     = {}                  # accumulated evaluation results
-    
+
     def evaluate(self):
         '''
         Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
@@ -107,7 +109,7 @@ class HierarchicalCOCOeval(COCOeval):
         self._paramsEval = copy.deepcopy(self.params)
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format(toc-tic))
-    
+
     def computeOks(self, imgId):
         p = self.params
         # dimention here should be Nxm
@@ -238,10 +240,10 @@ class HierarchicalCOCOeval(COCOeval):
         if not len(ious)==0:
             for tind, t in enumerate(p.iouThrs):
                 # --- Non-Greedy Matching using Iterative Refinement ---
-                
+
                 # Keep track of which detections are currently matched
                 d_matched = np.zeros(D, dtype=bool)
-                
+
                 # Use a list to manage detections that need to be matched or re-matched.
                 # Initially, this is all detections, in confidence order.
                 detections_to_process = list(range(D))
@@ -263,7 +265,7 @@ class HierarchicalCOCOeval(COCOeval):
                     best_gt_match_idx = -1
                     best_match_metrics = {}
                     best_iou = -1.0
-                    
+
                     # For ancestor-ignoring: track best hf1 if no positive boost is found
                     best_unmatched_hf1 = -1.0
                     best_unmatched_gt_idx = -1
@@ -281,12 +283,12 @@ class HierarchicalCOCOeval(COCOeval):
                         gt_label = self.label_to_name.get(g['category_id'])
                         if not gt_label:
                             continue
-                        
+
                         potential_match_metrics = hierarchical_prf_metric(
                             self.path_lookup, curr_d_label, gt_label, return_paths=True
                         )
                         potential_hf1 = potential_match_metrics['hf1']
-                        
+
                         # The "boost" is the improvement over the GT's current match (if any)
                         existing_hf1 = gt_hf1[tind, gind]
                         boost = potential_hf1 - existing_hf1
@@ -301,7 +303,7 @@ class HierarchicalCOCOeval(COCOeval):
                             best_gt_match_idx = gind
                             best_match_metrics = potential_match_metrics
                             best_iou = ious[dind, gind]
-                        
+
                         # If no positive boost, track the best raw hf1 for potential ancestor-ignoring
                         if potential_hf1 > best_unmatched_hf1:
                             best_unmatched_hf1 = potential_hf1
@@ -330,13 +332,13 @@ class HierarchicalCOCOeval(COCOeval):
                         gtm[tind, best_gt_match_idx] = d['id']
                         gtm_idx[tind, best_gt_match_idx] = dind
                         d_matched[dind] = True
-                        
+
                         # Store the metrics of the new best match
                         gt_hf1[tind, best_gt_match_idx] = best_match_metrics['hf1']
                         hierarchical_stats['overlaps'][tind, dind] = best_match_metrics['len_overlap']
                         hierarchical_stats['hprecision'][tind, dind] = best_match_metrics['hprecision']
                         hierarchical_stats['hrecall'][tind, dind] = best_match_metrics['hrecall']
-                    
+
                     # --- Integrated Ancestor-Ignoring Logic ---
                     # If the detection couldn't find a match that offered a positive boost
                     else:
@@ -442,7 +444,7 @@ class HierarchicalCOCOeval(COCOeval):
                 dtm  = np.concatenate([e['dtMatches'][:,0:maxDet] for e in E], axis=1)[:,inds]
                 dtIg = np.concatenate([e['dtIgnore'][:,0:maxDet]  for e in E], axis=1)[:,inds]
                 gtIg = np.concatenate([e['gtIgnore'] for e in E])
-                
+
                 # Hierarchical Stats
                 overlaps   = np.concatenate([e['hstats']['overlaps'][:, :maxDet] for e in E], axis=1)[:, inds]
                 hprecision = np.concatenate([e['hstats']['hprecision'][:, :maxDet] for e in E], axis=1)[:, inds]
@@ -459,7 +461,7 @@ class HierarchicalCOCOeval(COCOeval):
                 n_gt = int((gtIg == 0).sum())
                 if npig == 0:
                     continue
-                
+
                 valid_mask = ~dtIg
                 tps = np.where(valid_mask, overlaps, 0)
                 len_dt_2d = np.broadcast_to(len_dt, overlaps.shape)  # shape: (T, D)
@@ -478,7 +480,7 @@ class HierarchicalCOCOeval(COCOeval):
 
                     if nd:
                         recall[t,a,m] = rc[-1]
-                        
+
                     else:
                         recall[t,a,m] = 0
                     if nd:
@@ -504,7 +506,7 @@ class HierarchicalCOCOeval(COCOeval):
                         pass
                     precision[t,:,a,m] = np.array(q)
                     scores[t,:,a,m] = np.array(ss)
-                
+
                 for t in range(T):
                     # 1) mask out ignored detections
                     valid_mask    = ~dtIg[t]                       # shape (D,)
@@ -540,7 +542,7 @@ class HierarchicalCOCOeval(COCOeval):
                         f1_soft[t, a, m] = f1_scores.max()
                     else:
                         f1_soft[t, a, m] = 0.0
-                
+
         self.eval = {
             'params': p,
             'counts': [T, R, A, M],
@@ -682,6 +684,81 @@ class HierarchicalCOCOeval(COCOeval):
         self.stats = summarize()
 
 
+def _evaluate_task_chunk(coco_eval, tasks, maxDet):
+    evalImgs = [
+        coco_eval.evaluateImg(imgId, areaRng, maxDet)
+        for imgId, areaRng in tasks
+    ]
+    return evalImgs
+
+
+class HierarchicalCOCOevalMP(HierarchicalCOCOeval):
+    """Multiprocessing version of HierarchicalCOCOeval.
+
+    The per-image evaluation loop of ``evaluate()`` is split across a
+    process pool, following the same pattern as mmdet's ``COCOevalMP``.
+    Results are concatenated in the original task order so that
+    ``accumulate()`` can index ``self.evalImgs`` as before.
+    """
+
+    def __init__(self, hierarchy_tree, *args, nproc: int = 8, **kwargs):
+        super().__init__(hierarchy_tree, *args, **kwargs)
+        self.nproc = nproc
+
+    def evaluate(self):
+        '''
+        Run per image evaluation on given images in multiple processes and
+        store results (a list of dict) in self.evalImgs
+        :return: None
+        '''
+        tic = time.time()
+        print('Running per image evaluation...')
+        p = self.params
+        # add backward compatibility if useSegm is specified in params
+        if not p.useSegm is None:
+            p.iouType = 'segm' if p.useSegm == 1 else 'bbox'
+            print('useSegm (deprecated) is not None. Running {} evaluation'.format(p.iouType))
+        print('Evaluate annotation type *{}*'.format(p.iouType))
+        p.imgIds = list(np.unique(p.imgIds))
+        p.maxDets = sorted(p.maxDets)
+        self.params = p
+
+        self._prepare()
+        # loop through images, area range, max detection number
+        catIds = p.catIds if p.useCats else [-1]
+
+        if p.iouType == 'segm' or p.iouType == 'bbox':
+            computeIoU = self.computeIoU
+        elif p.iouType == 'keypoints':
+            computeIoU = self.computeOks
+        self.ious = {(imgId): computeIoU(imgId) \
+                        for imgId in p.imgIds}
+
+        maxDet = p.maxDets[-1]
+
+        # Create a list of all evaluation tasks
+        tasks = [(imgId, areaRng) for areaRng in p.areaRng for imgId in p.imgIds]
+
+        nproc = min(self.nproc, len(tasks)) if tasks else 1
+        split_size = len(tasks) // nproc
+        mp_params = []
+        for i in range(nproc):
+            begin = i * split_size
+            end = (i + 1) * split_size
+            if i == nproc - 1:
+                end = len(tasks)
+            mp_params.append((self, tasks[begin:end], maxDet))
+
+        with mp.Pool(nproc) as pool:
+            results = pool.starmap(_evaluate_task_chunk, mp_params)
+
+        self.evalImgs = list(itertools.chain(*results))
+
+        self._paramsEval = copy.deepcopy(self.params)
+        toc = time.time()
+        print('DONE (t={:0.2f}s).'.format(toc-tic))
+
+
 def hierarchical_prf_metric(
     path_lookup: Dict,
     dt_label,
@@ -718,3 +795,4 @@ def hierarchical_prf_metric(
         }
     else:
         return hf1
+

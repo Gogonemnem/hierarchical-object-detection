@@ -23,7 +23,7 @@ class EmbeddingDINOHead(FilteredDINOHead):
             cls_curvature (float): Curvature parameter for the embedding space.
             share_cls_layer (bool): Whether to share the classification
                 layer across all prediction layers.
-            
+
             cls_config (dict, optional): Configuration for the classification
                 layer. Defaults to None (uses default values).
                 Example config:

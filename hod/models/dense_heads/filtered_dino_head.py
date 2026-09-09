@@ -17,11 +17,11 @@ class FilteredDINOHead(DINOHead):
                  ann_file: str = '',
                  outputs_per_query: int = -1,
                  **kwargs):
-        
+
         self.load_taxonomy(ann_file)
         super().__init__(*args, **kwargs)
         num_classes = self.num_classes
-        
+
         if isinstance(outputs_per_query, int):
             self.outputs_per_query = max(min(outputs_per_query, num_classes), -2)
         elif isinstance(outputs_per_query, str):
@@ -80,11 +80,9 @@ class FilteredDINOHead(DINOHead):
                                  "Please provide a `class_hierarchy_path` during model initialization.")
             # For each query, keep a detection only if its score is >= scores of all its descendants.
             # This is implemented efficiently with a single bottom-up pass.
-            
+
             # 1. Get scores for all (query, class) pairs.
-            subtree_max_scores = cls_score.clone() # num_queries, num_classes`
-            
-            # keep = torch.ones_like(cls_score, dtype=torch.bool)
+            subtree_max_scores = cls_score.clone()  # (num_queries, num_classes)
 
             # 2. Traverse hierarchy bottom-up. For each node, update parent scores.
             # A parent's score is the max of its current score and its children's scores.
@@ -98,10 +96,10 @@ class FilteredDINOHead(DINOHead):
                     torch.maximum(subtree_max_scores[:, parent_idx],
                         subtree_max_scores[:, child_idx],
                         out=subtree_max_scores[:, parent_idx])
-            
+
             keep_desc = cls_score > (subtree_max_scores - 1e-6)
 
-            # 3) prune children whose ancestors are stronger
+            # 3. Prune children whose ancestors are stronger.
             keep = keep_desc.clone()
             for node in sorted_nodes:              # leaves→root
                 n_idx = self.class_to_idx[node.name]
@@ -116,7 +114,7 @@ class FilteredDINOHead(DINOHead):
                     keep[rows[higher_anc], n_idx] = False
                     anc = anc.parent
 
-            # 6. Flatten the results for global top-k selection.
+            # 4. Flatten the results for global top-k selection.
             flat_scores = cls_score[keep]
             flat_labels = torch.where(keep)[1]
             flat_bbox_idx = torch.where(keep)[0]
@@ -151,3 +149,4 @@ class FilteredDINOHead(DINOHead):
         results.labels = det_labels
         results.bbox_index = bbox_index
         return results
+

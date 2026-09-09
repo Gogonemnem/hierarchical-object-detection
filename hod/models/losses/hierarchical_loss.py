@@ -6,7 +6,7 @@ class HierarchicalDataMixin:
     def __init__(self, ann_file, **kwargs):
         self.ann_file = ann_file
         self.load_taxonomy(self.ann_file)
-    
+
     def load_taxonomy(self, ann_file):
         ann = load(ann_file)
         taxonomy = ann.get('taxonomy', {})

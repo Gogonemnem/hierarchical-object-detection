@@ -10,7 +10,10 @@ from mmdet.datasets.api_wrappers import COCO
 from mmdet.evaluation.metrics.coco_metric import CocoMetric
 from mmdet.registry import METRICS
 
-from hod.datasets.api_wrappers.hierarchical_coco import HierarchicalCOCOeval
+from hod.datasets.api_wrappers import (
+    HierarchicalCOCOeval,
+    HierarchicalCOCOevalMP,
+)
 
 @METRICS.register_module()
 class HierarchicalCocoMetric(CocoMetric):
@@ -105,10 +108,12 @@ class HierarchicalCocoMetric(CocoMetric):
                     'The testing results of the whole dataset is empty.')
                 break
 
-            # if self.use_mp_eval:
-            #     coco_eval = COCOevalMP(self._coco_api, coco_dt, iou_type)
-            # else:
-            coco_eval = HierarchicalCOCOeval(self.taxonomy, self._coco_api, coco_dt, iou_type)
+            if self.use_mp_eval:
+                coco_eval = HierarchicalCOCOevalMP(
+                    self.taxonomy, self._coco_api, coco_dt, iou_type)
+            else:
+                coco_eval = HierarchicalCOCOeval(
+                    self.taxonomy, self._coco_api, coco_dt, iou_type)
 
             coco_eval.params.catIds = self.cat_ids
             coco_eval.params.imgIds = self.img_ids
@@ -185,3 +190,4 @@ class HierarchicalCocoMetric(CocoMetric):
         if tmp_dir is not None:
             tmp_dir.cleanup()
         return eval_results
+

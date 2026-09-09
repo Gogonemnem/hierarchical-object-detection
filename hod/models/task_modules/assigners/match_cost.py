@@ -1,4 +1,4 @@
-from typing import Optional, Union, List, Dict
+from typing import Optional
 
 import torch
 from torch import Tensor
@@ -162,3 +162,4 @@ class HierarchicalFocalLossCost(FocalLossCost):
     # The __call__ method is inherited from FocalLossCost.
     # It checks self.binary_input. Since we initialize super() with binary_input=False,
     # it will correctly call self._focal_loss_cost(pred_instances.scores, gt_instances.labels).
+

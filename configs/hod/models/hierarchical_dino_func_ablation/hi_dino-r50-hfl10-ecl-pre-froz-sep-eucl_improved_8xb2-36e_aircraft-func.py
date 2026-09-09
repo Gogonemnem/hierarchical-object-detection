@@ -8,7 +8,7 @@ custom_imports = dict(imports=['hod.datasets', 'hod.evaluation', 'hod.models'], 
 
 model = dict(
     bbox_head=dict(
-        num_classes=111,
+        num_classes=145,
         cls_config=dict(
             freeze_embeddings=True,
         ),

@@ -180,5 +180,5 @@ class HierarchicalQualityFocalLoss(QualityFocalLoss, HierarchicalLossBase):
             avg_factor=avg_factor,
             activated=self.activated
         )
-                
+
         return self.loss_weight * loss

@@ -1,7 +1,7 @@
 from typing import List, Dict, Optional, Any
 
 class HierarchyNode:
-    def __init__(self, name: str, children: Optional[List['HierarchyNode']] = None, 
+    def __init__(self, name: str, children: Optional[List['HierarchyNode']] = None,
                  parent: Optional['HierarchyNode'] = None) -> None:
         self.name = name
         self.children = children or []
@@ -22,7 +22,7 @@ class HierarchyNode:
 
     def descendants(self) -> List[str]:
         """
-        Returns a list of all descendant class names.
+        Returns the names of this node and all nodes in its subtree.
         """
         descendants = []
         stack: List['HierarchyNode'] = [self]
@@ -50,12 +50,15 @@ class HierarchyNode:
 
     def __repr__(self) -> str:
         return self.name
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, HierarchyNode):
             return False
         return self.name == other.name and self.children == other.children
+
     def __lt__(self, other: 'HierarchyNode') -> bool:
         return self.name < other.name
+
     def __hash__(self) -> int:
         return hash(self.name) ^ hash(tuple(self.children))
 
@@ -76,7 +79,7 @@ class HierarchyTree:
         return HierarchyNode(name, children)
 
     def _register_nodes(self, node: HierarchyNode) -> None:
-        self.class_to_node[node.name] = node            
+        self.class_to_node[node.name] = node
         for child in node.children:
             self._register_nodes(child)
 
@@ -96,10 +99,10 @@ class HierarchyTree:
         # A node is considered a descendant of itself for this logic.
         if node_name == ancestor_name:
             return True
-        
+
         path_to_node = self.get_path(node_name)
         return ancestor_name in path_to_node
-    
+
     def is_ancestor(self, node_name: str, descendant_name: str) -> bool:
         """Check if a node is an ancestor of another node."""
         if node_name not in self.class_to_node or descendant_name not in self.class_to_node:
@@ -107,7 +110,7 @@ class HierarchyTree:
         # A node is considered an ancestor of itself for this logic.
         if node_name == descendant_name:
             return True
-        
+
         path_to_descendant = self.get_path(descendant_name)
         return node_name in path_to_descendant
 
@@ -120,7 +123,7 @@ class HierarchyTree:
         if node.parent is None:
             return []  # Root has no siblings
         return [child.name for child in node.parent.children if child.name != cls_name]
-    
+
     def get_grandparent(self, cls_name: str) -> str | None:
         """Get grandparent class name (parent's parent)."""
         node = self.class_to_node[cls_name]
@@ -133,15 +136,15 @@ class HierarchyTree:
         node = self.class_to_node[cls_name]
         if node.parent is None or node.parent.parent is None:
             return []  # Root or children of root have no cousins
-        
+
         cousins = []
         # Get parent's siblings
-        parent_siblings = [child for child in node.parent.parent.children 
+        parent_siblings = [child for child in node.parent.parent.children
                           if child.name != node.parent.name]
-        
+
         # Include parent's siblings themselves (cousin parents)
         cousins.extend([sibling.name for sibling in parent_siblings])
-        
+
         # Get all children of parent's siblings (traditional cousins)
         for sibling in parent_siblings:
             cousins.extend([child.name for child in sibling.children])
@@ -159,24 +162,24 @@ class HierarchyTree:
         """
         in_degree = {node: len(node.children) for node in self.class_to_node.values()}
         queue = [node for node, degree in in_degree.items() if degree == 0]
-        
+
         topo_order = []
         head = 0
         while head < len(queue):
             node = queue[head]
             head += 1
             topo_order.append(node)
-            
+
             if node.parent:
                 parent = node.parent
                 in_degree[parent] -= 1
                 if in_degree[parent] == 0:
                     queue.append(parent)
-        
+
         return topo_order
 
     def get_leaf_nodes(self) -> List[HierarchyNode]:
         return [node for node in self.class_to_node.values() if node.is_leaf()]
-    
+
     def __len__(self) -> int:
         return len(self.class_to_node)

@@ -6,16 +6,14 @@ from mmdet.utils import register_all_modules
 from pathlib import Path
 import copy
 
-# Import your EmbeddingClassifier, assuming path
 from hod.models.layers import EmbeddingClassifier
-# from hod.models.losses import HierarchicalContrastiveLoss, EntailmentConeLoss # If needed for isinstance checks on losses
 
-register_all_modules() 
+register_all_modules()
 
 def perform_prototype_pretraining(
-    model_config_path: str, 
-    output_checkpoint_file: Path, 
-    epochs: int, 
+    model_config_path: str,
+    output_checkpoint_file: Path,
+    epochs: int,
     device: str
 ) -> Path:
     """
@@ -29,7 +27,7 @@ def perform_prototype_pretraining(
 
     Returns:
         Path to the saved pre-trained checkpoint.
-        
+
     Raises:
         FileNotFoundError: If the config file is not found.
         ValueError: If critical components (model, classifier, loss, optimizer) cannot be built or found.
@@ -55,7 +53,7 @@ def perform_prototype_pretraining(
     loss_embed_cfg = None
     associated_module_config_path = "unknown" # For error reporting
     # The actual module instance in the built model that corresponds to this config path
-    module_for_primary_classifier = None 
+    module_for_primary_classifier = None
 
     if hasattr(cfg.model, 'bbox_head'):
         cfg_bbox_head = cfg.model.bbox_head
@@ -76,13 +74,13 @@ def perform_prototype_pretraining(
             associated_module_config_path = "model.bbox_head"
             if model_bbox_head:
                 module_for_primary_classifier = model_bbox_head
-    
+
     if loss_embed_cfg is None:
         raise ValueError(
             "Could not find loss_embed configuration in expected locations "
             "(e.g., cfg.model.bbox_head.cls_branches[0].loss_embed or cfg.model.bbox_head.loss_embed)."
         )
-    
+
     try:
         loss_fn = MODELS.build(loss_embed_cfg).to(device)
         print(f"Info: Successfully built loss function '{loss_embed_cfg.type}' for pre-training, from {associated_module_config_path}.")
@@ -98,7 +96,7 @@ def perform_prototype_pretraining(
         elif hasattr(module_for_primary_classifier, 'fc_cls') and \
              isinstance(module_for_primary_classifier.fc_cls, EmbeddingClassifier):
             primary_embedding_classifier = module_for_primary_classifier.fc_cls
-            
+
     if not primary_embedding_classifier:
         # Fallback: if the specific module didn't yield an EC, search generically.
         # This might indicate a config/model structure mismatch with where loss_embed_cfg was defined.
@@ -116,7 +114,7 @@ def perform_prototype_pretraining(
                 "associated with loss_embed_cfg is not an EmbeddingClassifier nor does it contain a .fc_cls "
                 "EmbeddingClassifier. A generic search also failed to find any EmbeddingClassifier."
             )
-    
+
     print(f"Info: Using primary EmbeddingClassifier: {type(primary_embedding_classifier).__name__} for optimization.")
 
     # Ensure embeddings are trainable for pre-training.
@@ -140,7 +138,7 @@ def perform_prototype_pretraining(
         if isinstance(m_, EmbeddingClassifier):
             if m_ not in all_embedding_classifiers_for_copy: # Ensure uniqueness
                  all_embedding_classifiers_for_copy.append(m_)
-    
+
     if not all_embedding_classifiers_for_copy:
         # This case should ideally not be hit if primary_embedding_classifier was found
         raise ValueError("No EmbeddingClassifier instances found in the model for copying, though a primary was identified.")
@@ -149,7 +147,6 @@ def perform_prototype_pretraining(
 
     # Determine parameters to optimize
     params_to_optimize = []
-    # ... (rest of the function from this point, with 'embedding_classifier' replaced by 'primary_embedding_classifier')
     # Use primary_embedding_classifier for getting .embeddings, .prototypes, .logit_scale
     if hasattr(primary_embedding_classifier, 'embeddings') and isinstance(primary_embedding_classifier.embeddings, torch.nn.Parameter):
         params_to_optimize.append(primary_embedding_classifier.embeddings)
@@ -164,7 +161,7 @@ def perform_prototype_pretraining(
             params_to_optimize.append(primary_embedding_classifier.logit_scale)
         else:
             print(f"Warning: HierarchicalContrastiveLoss is used, but logit_scale not found or not a Parameter in primary {type(primary_embedding_classifier).__name__}. It will not be optimized.")
-    
+
     if not params_to_optimize:
         raise ValueError("No parameters to optimize for pre-training from the primary EmbeddingClassifier.")
 
@@ -173,38 +170,31 @@ def perform_prototype_pretraining(
     try:
         if not hasattr(cfg, 'optim_wrapper'):
             raise ValueError("Optimizer wrapper configuration (cfg.optim_wrapper) not found in config.")
-        
+
         # Deepcopy the optimizer part of the config to avoid modifying the original
         optimizer_cfg_original = cfg.optim_wrapper.get('optimizer')
         if optimizer_cfg_original is None:
             raise ValueError("cfg.optim_wrapper.optimizer key is missing.")
         if not isinstance(optimizer_cfg_original, (dict, Config)):
             raise ValueError(f"cfg.optim_wrapper.optimizer is not a dictionary-like object, got {type(optimizer_cfg_original)}.")
-            
-        optimizer_config_for_build = copy.deepcopy(dict(optimizer_cfg_original)) # Ensure it's a dict for modification
-        optimizer_config_for_build['params'] = params_to_optimize # Set the specific parameters to optimize
-        
-        # Build the optimizer with only the specified parameters
+
+        optimizer_config_for_build = copy.deepcopy(dict(optimizer_cfg_original))
+        optimizer_config_for_build['params'] = params_to_optimize
+
         actual_optimizer = OPTIMIZERS.build(optimizer_config_for_build)
-        
-        # Deepcopy the optim_wrapper base config and set the new optimizer
-        optim_wrapper_base_cfg_for_build = copy.deepcopy(dict(cfg.optim_wrapper)) # Ensure it's a dict
+
+        # Rebuild the OptimWrapper with a simplified config for pre-training
+        # (paramwise rules from the main training run do not apply to this
+        # limited set of prototype parameters).
+        optim_wrapper_base_cfg_for_build = copy.deepcopy(dict(cfg.optim_wrapper))
         optim_wrapper_base_cfg_for_build['optimizer'] = actual_optimizer
-        
-        # If paramwise_cfg exists, it might apply to the selected params if their names match.
-        # For pre-training, usually, a simpler setup is desired.
-        # If you want to *ignore* main training's paramwise_cfg for pre-training,
-        # you could del optim_wrapper_base_cfg['paramwise_cfg'] if it exists.
-        # However, if the pre-trainable params (embeddings, logit_scale) have specific rules
-        # in paramwise_cfg that you *want* to apply, then leave it.
-        # For now, let's assume we want to keep it simple and potentially ignore complex paramwise rules
-        # that might not apply or might be problematic for this limited set of parameters.
+
         if 'paramwise_cfg' in optim_wrapper_base_cfg_for_build:
             print("Info: 'paramwise_cfg' found in optim_wrapper. Removing for pre-training OptimWrapper construction.")
-            del optim_wrapper_base_cfg_for_build['paramwise_cfg'] # Ensure this is active
+            del optim_wrapper_base_cfg_for_build['paramwise_cfg']
 
         optim_wrapper_instance = OPTIM_WRAPPERS.build(optim_wrapper_base_cfg_for_build)
-        
+
         effective_lr = optimizer_config_for_build.get('lr', 'N/A')
         optimizer_type_str = optimizer_config_for_build.get('type', 'N/A')
         print(f"Info: Successfully built OptimWrapper for pre-training with optimizer: {optimizer_type_str} with LR: {effective_lr}")
@@ -218,7 +208,7 @@ def perform_prototype_pretraining(
 
     for epoch in range(epochs):
         optim_wrapper_instance.optimizer.zero_grad()
-        
+
         current_prototypes_for_loss = None
         if hasattr(primary_embedding_classifier, 'embeddings') and isinstance(primary_embedding_classifier.embeddings, torch.nn.Parameter):
             current_prototypes_for_loss = primary_embedding_classifier.embeddings
@@ -247,10 +237,10 @@ def perform_prototype_pretraining(
             if 'HierarchicalContrastiveLoss' in loss_type_from_config and hasattr(primary_embedding_classifier, 'logit_scale'):
                 log_msg += f", LogitScale: {primary_embedding_classifier.logit_scale.item():.4f}"
             print(log_msg)
-    
+
     # --- Copy optimized parameters to all identified EmbeddingClassifiers ---
     print(f"Info: Copying optimized parameters from primary {type(primary_embedding_classifier).__name__} to {len(all_embedding_classifiers_for_copy)} EmbeddingClassifier instance(s).")
-    
+
     optimized_embeddings_data = None
     # Determine which attribute holds the embeddings in the primary classifier
     primary_embeddings_attr_name = None
@@ -259,7 +249,7 @@ def perform_prototype_pretraining(
         primary_embeddings_attr_name = 'embeddings'
     elif hasattr(primary_embedding_classifier, 'prototypes') and isinstance(primary_embedding_classifier.prototypes, torch.nn.Parameter):
         optimized_embeddings_data = primary_embedding_classifier.prototypes.data
-    
+
     optimized_logit_scale_data = None
     if 'HierarchicalContrastiveLoss' in loss_type_from_config and \
        hasattr(primary_embedding_classifier, 'logit_scale') and \
@@ -280,7 +270,7 @@ def perform_prototype_pretraining(
             elif hasattr(target_clf, 'prototypes') and isinstance(target_clf.prototypes, torch.nn.Parameter):
                 target_clf.prototypes.data.copy_(optimized_embeddings_data)
                 copied_to_attr = True
-            
+
             if not copied_to_attr:
                 print(f"Warning: Could not copy embeddings to {type(target_clf).__name__} as it lacks .embeddings or .prototypes Parameter.")
 
@@ -290,14 +280,14 @@ def perform_prototype_pretraining(
             # else:
             #     print(f"Warning: Could not copy logit_scale to {type(target_clf).__name__} as it lacks .logit_scale Parameter or it was not optimized.")
     # --- End Copying ---
-    
+
     checkpoint = {
         'meta': {
             'config_path': model_config_path,
             'pretrain_epochs': epochs,
             'config_text': cfg.text # Save the config text
         },
-        'state_dict': model.state_dict() 
+        'state_dict': model.state_dict()
     }
     torch.save(checkpoint, output_checkpoint_file)
     print(f"Info: Pre-trained prototype checkpoint saved to {output_checkpoint_file}")

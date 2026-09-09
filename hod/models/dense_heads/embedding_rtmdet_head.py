@@ -73,9 +73,14 @@ class EmbeddingRTMDetSepBNHead(RTMDetSepBNHead):
     def __init__(self,
                  ann_file='',
                  cls_curvature=0.0,
+                 k_per_anchor=1,
                  cls_config: OptConfigType=None,
                  loss_embed: OptConfigType=None,
                  **kwargs):
+        if not isinstance(k_per_anchor, int) or isinstance(k_per_anchor, bool) or k_per_anchor < 1:
+            raise ValueError(
+                f"k_per_anchor must be a positive integer, got {k_per_anchor!r}")
+        self.k_per_anchor = k_per_anchor
         default_cls_config = {}
         self.cls_config = default_cls_config.copy()
         if cls_config and isinstance(cls_config, dict):
@@ -281,10 +286,6 @@ class EmbeddingRTMDetSepBNHead(RTMDetSepBNHead):
                 scores = self.loss_cls.get_activation(cls_score)
             elif self.use_sigmoid_cls:
                 scores = cls_score.sigmoid()
-                # k_per_query = -1
-                # if k_per_query != -1:
-                #     # Get top-k per query
-                #     scores, labels = cls_score.topk(k_per_query, dim=1)
             else:
                 # remind that we set FG labels to [0, num_class-1]
                 # since mmdet v2.0
@@ -300,7 +301,7 @@ class EmbeddingRTMDetSepBNHead(RTMDetSepBNHead):
 
             results = filter_scores_and_topk(
                 scores, score_thr, nms_pre,
-                dict(bbox_pred=bbox_pred, priors=priors, k_per_anchor=1))
+                dict(bbox_pred=bbox_pred, priors=priors, k_per_anchor=self.k_per_anchor))
             scores, labels, keep_idxs, filtered_results = results
 
             # Use filtered_results only if it is a dict

@@ -21,7 +21,7 @@ def load_hpo_config(config_path: str) -> ConfigDict:
     abs_config_path = PROJECT_ROOT / config_path
     if not abs_config_path.exists():
         raise FileNotFoundError(f"HPO config file not found at {abs_config_path}")
-    
+
     cfg = Config.fromfile(str(abs_config_path))
     return cfg._cfg_dict
 
@@ -40,7 +40,7 @@ def main():
     hpo_settings = load_hpo_config(args.hpo_cfg)
 
     num_samples = hpo_settings.get("num_samples", 10)
-    metric = hpo_settings.get("metric", "mAP") 
+    metric = hpo_settings.get("metric", "mAP")
     mode = hpo_settings.get("mode", "max")
     search_alg_config = hpo_settings.get("search_alg")
     scheduler_config = hpo_settings.get("scheduler")
@@ -49,7 +49,7 @@ def main():
     if not abs_cfg_path.exists():
         print(f"ERROR: Config file not found at {abs_cfg_path}.")
         return
-    
+
     base_cfg = Config.fromfile(str(abs_cfg_path))
     param_space_for_worker = config_to_param_space(base_cfg._cfg_dict)
 
@@ -68,10 +68,10 @@ def main():
         use_gpu_for_trial = True
         if args.gpus_per_trial > 1:
             num_workers_for_trial = int(args.gpus_per_trial)
-    
+
     torch_trainer = TorchTrainer(
         train_loop_per_worker,
-        train_loop_config=initial_train_loop_config, 
+        train_loop_config=initial_train_loop_config,
         scaling_config=train.ScalingConfig(
             num_workers=num_workers_for_trial,
             use_gpu=use_gpu_for_trial,
@@ -91,8 +91,8 @@ def main():
             search_alg = BasicVariantGenerator(**alg_params)
         else:
             print(f"Warning: Unknown search_alg type: {alg_type}. No search algorithm will be used.")
-    
-    if not search_alg: 
+
+    if not search_alg:
         search_alg = OptunaSearch(metric=metric, mode=mode, seed=0)
 
     scheduler = None
@@ -109,11 +109,11 @@ def main():
             scheduler = None
         else:
             print(f"Warning: Unknown scheduler type: {sch_type}. No scheduler will be used.")
-            scheduler = None 
-            
+            scheduler = None
+
     if not scheduler and scheduler_config and scheduler_config.get("type") not in ["None", None]:
         scheduler = ASHAScheduler()
-    elif scheduler_config is None: 
+    elif scheduler_config is None:
         scheduler = ASHAScheduler()
 
     tuner = tune.Tuner(
@@ -131,7 +131,7 @@ def main():
             storage_path=str(PROJECT_ROOT / "work_dirs" / "ray_results"),
         )
     )
-    
+
     results = tuner.fit()
 
     print("--- HPO Run Complete ---")

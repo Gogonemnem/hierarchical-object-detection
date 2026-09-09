@@ -57,12 +57,12 @@ class EmbeddingClassifier(nn.Module):
             self.geometric_bias = Parameter(torch.empty(1, **factory_kwargs))
         else:
             self.register_parameter("geometric_bias", None)
-        
+
         if use_temperature:
             self.logit_scale = nn.Parameter(torch.tensor(1.0).log())  # log(1.0) = 0.0
         else:
             self.register_parameter("logit_scale", None)
-        
+
         self.reset_parameters(init_norm_upper_offset)
 
     def reset_parameters(self, init_norm_upper_offset=None) -> None:
@@ -106,14 +106,14 @@ class EmbeddingClassifier(nn.Module):
         raw_embeddings = self.embeddings
         if self.curvature < 0.0:
             raw_embeddings = self.expmap0(raw_embeddings, c=self.curvature)
-        
+
         # Apply norm clipping if cone loss is used (use_cone is set at init)
         if self.use_cone:
             # _apply_min_norm_clipping handles the exempt_mask internally.
             # It returns a new tensor if clipping occurs, otherwise the original.
             # This is differentiable.
             raw_embeddings = self._apply_min_norm_clipping(raw_embeddings)
-            
+
         return raw_embeddings
 
     def expmap0(self, x: torch.Tensor, c: float = -1.0, eps: float = 1e-5):
@@ -183,13 +183,13 @@ class EmbeddingClassifier(nn.Module):
             dists = self.pairwise_poincare_distance(features, embeddings)
         else:
             raise NotImplementedError("Invalid curvature value. Must be 0.0 or -1.0.")
-        
+
         if self.use_temperature and self.logit_scale is not None:
             scale = self.logit_scale.exp().clamp(max=100)
             logits = -dists * scale
         else:
             logits = -dists
-        
+
         return logits
 
     def pairwise_poincare_distance(self, x, y, eps=1e-5,

@@ -1,0 +1,6 @@
+repos:
+  - repo: https://github.com/MarcoGorelli/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+        args: [--keep-output]

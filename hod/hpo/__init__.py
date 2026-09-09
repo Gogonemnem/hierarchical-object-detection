@@ -7,6 +7,6 @@ from .auto_space import config_to_param_space
 from .trainable import train_loop_per_worker
 
 __all__ = [
-    "config_to_param_space", 
+    "config_to_param_space",
     "train_loop_per_worker",
 ]
